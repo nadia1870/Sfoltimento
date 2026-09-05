@@ -1,30 +1,21 @@
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
-using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Engine;
+using System.Reflection;
 using OSM.PaymentOrder.Purge.Engine.BatchExecution;
-using OSM.PaymentOrder.Purge.Observability;
+using Xunit;
 
 namespace OSM.PaymentOrder.Purge.Tests;
 
 public sealed class BatchExecutionCoordinatorContractTests
 {
-    // Contract-level smoke test: verifies the new abstractions are constructible
-    // and keep the coordinator independent from PurgeRunStore/SliceExecutor.
     [Fact]
     public void Coordinator_depends_on_abstractions()
     {
-        var ctor = typeof(BatchExecutionCoordinator)
-            .GetConstructors()
-            .Single();
+        var ctor = typeof(BatchExecutionCoordinator).GetConstructors().Single();
+        var parameterTypes = ctor.GetParameters().Select(p => p.ParameterType).ToArray();
 
-        var parameters = ctor.GetParameters()
-            .Select(p => p.ParameterType)
-            .ToArray();
-
-        Assert.Contains(typeof(IBatchWorkProvider), parameters);
-        Assert.Contains(typeof(IBatchExecutor), parameters);
-        Assert.DoesNotContain(typeof(PurgeRunStore), parameters);
-        Assert.DoesNotContain(typeof(SliceExecutor), parameters);
+        Assert.Contains(typeof(IBatchWorkProvider), parameterTypes);
+        Assert.Contains(typeof(IBatchExecutor), parameterTypes);
+        Assert.DoesNotContain(typeof(PurgeRunStore), parameterTypes);
+        Assert.DoesNotContain(typeof(SliceExecutor), parameterTypes);
     }
 }

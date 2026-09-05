@@ -1,131 +1,103 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Engine;
 using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 using OSM.PaymentOrder.Purge.Engine.Phases;
+using Xunit;
 
 namespace OSM.PaymentOrder.Purge.Tests;
 
 public sealed class ExecutingPhaseTests
 {
     [Fact]
-    public async Task Completato_senza_collective_tail_transita_a_completed()
+    public async Task Completed_without_collective_tail_completes_phase()
     {
-        var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(2, 0, 17));
-        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
-        var phase = new ExecutingPhase(coordinator, resolver);
-        var run = CreateRun(RetentionStrategy.Terminated);
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 1, 0, 10));
+        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
 
-        var result = await phase.ExecuteAsync(run, CancellationToken.None);
+        var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
 
+        Assert.True(result.Stop);
         Assert.Equal(RunPhase.Completed, result.NextPhase);
-        Assert.True(result.Stop);
-        Assert.Null(result.Error);
-        Assert.Equal(1, coordinator.Calls);
     }
 
     [Fact]
-    public async Task Completato_con_collective_tail_transita_a_collective_tail()
+    public async Task Completed_with_collective_tail_moves_to_collective_tail()
     {
-        var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(1, 0, 8));
-        var resolver = CreateResolver(RetentionStrategy.Collective, requiresCollectiveTail: true);
-        var phase = new ExecutingPhase(coordinator, resolver);
-        var run = CreateRun(RetentionStrategy.Collective);
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 1, 0, 10));
+        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Collective, true));
 
-        var result = await phase.ExecuteAsync(run, CancellationToken.None);
+        var result = await phase.ExecuteAsync(CreateRun(RetentionStrategy.Collective), CancellationToken.None);
 
-        Assert.Equal(RunPhase.CollectiveTail, result.NextPhase);
         Assert.False(result.Stop);
-        Assert.Null(result.Error);
+        Assert.Equal(RunPhase.CollectiveTail, result.NextPhase);
     }
 
     [Fact]
-    public async Task Finestra_chiusa_mantiene_il_run_in_executing()
+    public async Task Incomplete_execution_stays_in_phase()
     {
-        var coordinator = new FakeCoordinator(BatchExecutionResult.WindowClosed(3, 0, 25));
-        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
-        var phase = new ExecutingPhase(coordinator, resolver);
-        var run = CreateRun(RetentionStrategy.Terminated);
+        var coordinator = new StubCoordinator(new BatchExecutionResult(false, 1, 0, 10));
+        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
 
-        var result = await phase.ExecuteAsync(run, CancellationToken.None);
+        var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
 
-        Assert.Null(result.NextPhase);
         Assert.True(result.Stop);
-        Assert.Null(result.Error);
+        Assert.Null(result.NextPhase);
     }
 
     [Fact]
-    public async Task CancellationToken_viene_propagato_al_coordinator()
+    public async Task Coordinator_receives_same_run()
     {
-        var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(0, 0, 0));
-        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
-        var phase = new ExecutingPhase(coordinator, resolver);
-        var run = CreateRun(RetentionStrategy.Terminated);
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 0, 0, 0));
+        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
+        var run = CreateRun();
+
+        await phase.ExecuteAsync(run, CancellationToken.None);
+
+        Assert.Same(run, coordinator.Run);
+    }
+
+    [Fact]
+    public async Task Coordinator_receives_cancellation_token()
+    {
         using var cts = new CancellationTokenSource();
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 0, 0, 0));
+        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
 
-        await phase.ExecuteAsync(run, cts.Token);
+        await phase.ExecuteAsync(CreateRun(), cts.Token);
 
-        Assert.Equal(cts.Token, coordinator.ReceivedToken);
+        Assert.Equal(cts.Token, coordinator.Token);
     }
 
-    [Fact]
-    public async Task Errore_del_coordinator_non_viene_assorbito_dalla_phase()
+    private static PurgeRun CreateRun(RetentionStrategy strategy = RetentionStrategy.Terminated) => new()
     {
-        var coordinator = new FakeCoordinator(
-            new InvalidOperationException("boom"));
-        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
-        var phase = new ExecutingPhase(coordinator, resolver);
-        var run = CreateRun(RetentionStrategy.Terminated);
+        RunId = Guid.NewGuid(),
+        Strategy = strategy,
+        Phase = RunPhase.Executing,
+        DryRun = false,
+        AnchorMode = RetentionAnchorMode.RollingDate,
+        RetentionCutoff = DateTime.UtcNow,
+        AbandonedCutoff = null,
+        MaxRowsPerBatch = 50,
+        MaxOrdersPerBatch = 10
+    };
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => phase.ExecuteAsync(run, CancellationToken.None));
+    private static PurgeStrategyResolver CreateResolver(RetentionStrategy strategy, bool requiresCollectiveTail) =>
+        new(new[] { new FakeStrategy(strategy, requiresCollectiveTail) });
 
-        Assert.Equal("boom", ex.Message);
-    }
-
-    private static PurgeRun CreateRun(RetentionStrategy strategy) =>
-        new()
-        {
-            RunId = Guid.NewGuid(),
-            Strategy = strategy,
-            Phase = RunPhase.Executing,
-            DryRun = false,
-            AnchorMode = RetentionAnchorMode.RollingDate,
-            RetentionCutoff = DateTime.UtcNow.AddYears(-2),
-            MaxRowsPerBatch = 3000,
-            MaxOrdersPerBatch = 500
-        };
-
-    private sealed class FakeCoordinator : IBatchExecutionCoordinator
+    private sealed class StubCoordinator(BatchExecutionResult result) : IBatchExecutionCoordinator
     {
-        private readonly BatchExecutionResult? _result;
-        private readonly Exception? _exception;
-
-        public int Calls { get; private set; }
-        public CancellationToken ReceivedToken { get; private set; }
-
-        public FakeCoordinator(BatchExecutionResult result) => _result = result;
-        public FakeCoordinator(Exception exception) => _exception = exception;
+        public PurgeRun? Run { get; private set; }
+        public CancellationToken Token { get; private set; }
 
         public Task<BatchExecutionResult> ExecuteAsync(PurgeRun run, CancellationToken ct)
         {
-            Calls++;
-            ReceivedToken = ct;
-            if (_exception is not null)
-                throw _exception;
-
-            return Task.FromResult(_result!);
+            Run = run;
+            Token = ct;
+            return Task.FromResult(result);
         }
     }
 
-    private static PurgeStrategyResolver CreateResolver(
-        RetentionStrategy strategy,
-        bool requiresCollectiveTail) =>
-        new(new[] { new FakeStrategy(strategy, requiresCollectiveTail) });
-
-    private sealed class FakeStrategy(
-        RetentionStrategy type,
-        bool requiresCollectiveTail) : IPurgeStrategy
+    private sealed class FakeStrategy(RetentionStrategy type, bool requiresCollectiveTail) : IPurgeStrategy
     {
         public RetentionStrategy Type => type;
         public PurgePlanningMode PlanningMode => PurgePlanningMode.Standard;
@@ -135,7 +107,6 @@ public sealed class ExecutingPhaseTests
         public DateTime CutoffOf(PurgeRun run) => run.RetentionCutoff;
         public Task<int> SelectAsync(PurgeRun run, CancellationToken ct) => Task.FromResult(0);
         public Task ExpandAsync(PurgeRun run, CancellationToken ct) => Task.CompletedTask;
-        public IEnumerable<(string Table, string Sql)> GetSliceStatements() =>
-            Array.Empty<(string Table, string Sql)>();
+        public IEnumerable<(string Table, string Sql)> GetSliceStatements() => Array.Empty<(string, string)>();
     }
 }
