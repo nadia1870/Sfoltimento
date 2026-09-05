@@ -5,7 +5,7 @@ namespace OSM.PaymentOrder.Purge.Engine.Phases;
 
 public sealed class ExecutingPhase(
     IBatchExecutionCoordinator coordinator,
-    IPurgeStrategyResolver strategyResolver) : IPurgePhase
+    PurgeStrategyResolver strategyResolver) : IPurgePhase
 {
     private static readonly IReadOnlySet<RunPhase> Supported =
         new HashSet<RunPhase> { RunPhase.Executing };

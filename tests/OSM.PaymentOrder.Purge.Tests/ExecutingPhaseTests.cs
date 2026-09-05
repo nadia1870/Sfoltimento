@@ -12,7 +12,7 @@ public sealed class ExecutingPhaseTests
     public async Task Completato_senza_collective_tail_transita_a_completed()
     {
         var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(2, 0, 17));
-        var resolver = new FakeResolver(requiresCollectiveTail: false);
+        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
         var phase = new ExecutingPhase(coordinator, resolver);
         var run = CreateRun(RetentionStrategy.Terminated);
 
@@ -28,7 +28,7 @@ public sealed class ExecutingPhaseTests
     public async Task Completato_con_collective_tail_transita_a_collective_tail()
     {
         var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(1, 0, 8));
-        var resolver = new FakeResolver(requiresCollectiveTail: true);
+        var resolver = CreateResolver(RetentionStrategy.Collective, requiresCollectiveTail: true);
         var phase = new ExecutingPhase(coordinator, resolver);
         var run = CreateRun(RetentionStrategy.Collective);
 
@@ -43,7 +43,7 @@ public sealed class ExecutingPhaseTests
     public async Task Finestra_chiusa_mantiene_il_run_in_executing()
     {
         var coordinator = new FakeCoordinator(BatchExecutionResult.WindowClosed(3, 0, 25));
-        var resolver = new FakeResolver(requiresCollectiveTail: false);
+        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
         var phase = new ExecutingPhase(coordinator, resolver);
         var run = CreateRun(RetentionStrategy.Terminated);
 
@@ -58,7 +58,7 @@ public sealed class ExecutingPhaseTests
     public async Task CancellationToken_viene_propagato_al_coordinator()
     {
         var coordinator = new FakeCoordinator(BatchExecutionResult.CompletedRun(0, 0, 0));
-        var resolver = new FakeResolver(requiresCollectiveTail: false);
+        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
         var phase = new ExecutingPhase(coordinator, resolver);
         var run = CreateRun(RetentionStrategy.Terminated);
         using var cts = new CancellationTokenSource();
@@ -73,7 +73,7 @@ public sealed class ExecutingPhaseTests
     {
         var coordinator = new FakeCoordinator(
             new InvalidOperationException("boom"));
-        var resolver = new FakeResolver(requiresCollectiveTail: false);
+        var resolver = CreateResolver(RetentionStrategy.Terminated, requiresCollectiveTail: false);
         var phase = new ExecutingPhase(coordinator, resolver);
         var run = CreateRun(RetentionStrategy.Terminated);
 
@@ -118,15 +118,16 @@ public sealed class ExecutingPhaseTests
         }
     }
 
-    private sealed class FakeResolver(bool requiresCollectiveTail) : IPurgeStrategyResolver
-    {
-        private readonly FakeStrategy _strategy = new(requiresCollectiveTail);
-        public IPurgeStrategy Resolve(RetentionStrategy strategy) => _strategy;
-    }
+    private static PurgeStrategyResolver CreateResolver(
+        RetentionStrategy strategy,
+        bool requiresCollectiveTail) =>
+        new(new[] { new FakeStrategy(strategy, requiresCollectiveTail) });
 
-    private sealed class FakeStrategy(bool requiresCollectiveTail) : IPurgeStrategy
+    private sealed class FakeStrategy(
+        RetentionStrategy type,
+        bool requiresCollectiveTail) : IPurgeStrategy
     {
-        public RetentionStrategy Type => RetentionStrategy.Terminated;
+        public RetentionStrategy Type => type;
         public PurgePlanningMode PlanningMode => PurgePlanningMode.Standard;
         public bool RequiresCollectiveTail => requiresCollectiveTail;
         public bool SkipCollectiveLinkValidation => false;

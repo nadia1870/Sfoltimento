@@ -82,17 +82,16 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton<IPurgeStrategy, CollectiveStrategy>();
         services.AddSingleton<IPurgeStrategy, OrphanHistoryStrategy>();
         services.AddSingleton<PurgeStrategyResolver>();
-        services.AddSingleton<IPurgeStrategyResolver>(sp => sp.GetRequiredService<PurgeStrategyResolver>());
 
         services.AddSingleton<PreDeleteValidator>();
         services.AddSingleton<BatchPlanner>();
         services.AddSingleton<DryRunReporter>();
 
         services.AddSingleton<SliceExecutor>();
+        services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();
+        services.AddSingleton<IBatchExecutor, SliceBatchExecutor>();
+        services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
 
-        // V5: ExecutingPhase delega l'esecuzione delle slice al coordinator.
-        services.AddSingleton<BatchExecutionCoordinator>();
-        services.AddSingleton<IBatchExecutionCoordinator>(sp => sp.GetRequiredService<BatchExecutionCoordinator>());
 
         services.AddSingleton<CollectiveTailExecutor>();
         services.AddSingleton<IPurgePhase, SelectingPhase>();

@@ -102,13 +102,13 @@ public static class Program
         builder.Services.AddSingleton<IPurgeStrategy, CollectiveStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, OrphanHistoryStrategy>();
         builder.Services.AddSingleton<PurgeStrategyResolver>();
-builder.Services.AddSingleton<IPurgeStrategyResolver>(sp => sp.GetRequiredService<PurgeStrategyResolver>());
         builder.Services.AddSingleton<PreDeleteValidator>();
         builder.Services.AddSingleton<BatchPlanner>();
         builder.Services.AddSingleton<DryRunReporter>();
         builder.Services.AddSingleton<SliceExecutor>();
-        builder.Services.AddSingleton<BatchExecutionCoordinator>();
-        builder.Services.AddSingleton<IBatchExecutionCoordinator>(sp => sp.GetRequiredService<BatchExecutionCoordinator>());
+        builder.Services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();
+        builder.Services.AddSingleton<IBatchExecutor, SliceBatchExecutor>();
+        builder.Services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
         builder.Services.AddSingleton<CollectiveTailExecutor>();
         builder.Services.AddSingleton<IPurgePhase, SelectingPhase>();
         builder.Services.AddSingleton<IPurgePhase, ExpandingPhase>();

@@ -16,14 +16,9 @@ namespace OSM.PaymentOrder.Purge.Engine.BatchExecution;
 /// È il seam naturale per una futura implementazione asincrona/distribuita
 /// (es. RabbitMQ): ExecutingPhase non deve conoscere il meccanismo di dispatch.
 /// </summary>
-public interface IBatchExecutionCoordinator
-{
-    Task<BatchExecutionResult> ExecuteAsync(PurgeRun run, CancellationToken ct);
-}
-
 public sealed class BatchExecutionCoordinator(
-    PurgeRunStore store,
-    SliceExecutor executor,
+    IBatchWorkProvider workProvider,
+    IBatchExecutor executor,
     PurgeMetrics metrics,
     IOptions<PurgeOptions> options,
     ILogger<BatchExecutionCoordinator> log) : IBatchExecutionCoordinator
@@ -53,7 +48,7 @@ public sealed class BatchExecutionCoordinator(
                     totalRows);
             }
 
-            var slice = await store.NextPendingSliceAsync(
+            var slice = await workProvider.GetNextAsync(
                 run.RunId,
                 ct).ConfigureAwait(false);
 
@@ -75,7 +70,7 @@ public sealed class BatchExecutionCoordinator(
                 case SliceOutcome.Retryable
                     when slice.AttemptCount + 1 < _options.MaxSliceAttempts:
 
-                    await store.RecordAttemptAsync(
+                    await workProvider.RecordAttemptAsync(
                         run.RunId,
                         slice.BatchNo,
                         result.Reason,
@@ -89,7 +84,7 @@ public sealed class BatchExecutionCoordinator(
                 default:
                     // Un singolo aggregato problematico non deve bloccare
                     // l'intero sfoltimento.
-                    await store.AbandonSliceAsync(
+                    await workProvider.AbandonAsync(
                         run.RunId,
                         slice.BatchNo,
                         result.Reason,
