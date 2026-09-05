@@ -27,7 +27,7 @@ public sealed class SelectingPhase(
                 await dryRunReporter.ProduceAsync(run, ct).ConfigureAwait(false);
 
             log.LogInformation(
-                "PurgeRunCompleted RunId={RunId} Strategy={Strategy} Candidati=0 " +
+                "PurgeSelectionEmpty RunId={RunId} Strategy={Strategy} Candidati=0 " +
                 "Cutoff={Cutoff:yyyy-MM-dd} — nessun ordine eleggibile.",
                 run.RunId, run.Strategy, strategy.CutoffOf(run));
 

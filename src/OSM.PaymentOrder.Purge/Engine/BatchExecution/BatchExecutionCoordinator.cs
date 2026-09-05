@@ -82,10 +82,17 @@ public sealed class BatchExecutionCoordinator(
                         result.Reason,
                         ct).ConfigureAwait(false);
 
+                    // Il TimeProvider e' gia' iniettato per la finestra: usarlo
+                    // anche qui rende le attese controllabili nei test e evita
+                    // che il coordinatore dipenda dall'orologio di sistema.
                     await Task.Delay(
                         _options.RetryDelay,
+                        clock,
                         ct).ConfigureAwait(false);
-                    break;
+
+                    // Il ritardo di retry sostituisce il pacing fra slice:
+                    // sommarli farebbe attendere RetryDelay + InterSliceDelay.
+                    continue;
 
                 default:
                     // Un singolo aggregato problematico non deve bloccare
@@ -105,11 +112,16 @@ public sealed class BatchExecutionCoordinator(
 
             await Task.Delay(
                 _options.InterSliceDelay,
+                clock,
                 ct).ConfigureAwait(false);
         }
 
+        // Non "PurgeRunCompleted": il run puo' ancora dover attraversare
+        // CollectiveTail, ed e' l'orchestratore a stabilire quando e' concluso.
+        // Un evento con quel nome emesso qui anticiperebbe un fatto non avvenuto
+        // e produrrebbe due righe per lo stesso run nelle query sui log.
         log.LogInformation(
-            "PurgeRunCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
+            "PurgeBatchExecutionCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
             "SliceAbbandonate={Abandoned}",
             run.RunId,
             totalRows,

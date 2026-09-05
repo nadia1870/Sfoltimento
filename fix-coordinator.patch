@@ -1,0 +1,88 @@
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+index 919849a..7a82afc 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+@@ -82,10 +82,17 @@ public sealed class BatchExecutionCoordinator(
+                         result.Reason,
+                         ct).ConfigureAwait(false);
+ 
++                    // Il TimeProvider e' gia' iniettato per la finestra: usarlo
++                    // anche qui rende le attese controllabili nei test e evita
++                    // che il coordinatore dipenda dall'orologio di sistema.
+                     await Task.Delay(
+                         _options.RetryDelay,
++                        clock,
+                         ct).ConfigureAwait(false);
+-                    break;
++
++                    // Il ritardo di retry sostituisce il pacing fra slice:
++                    // sommarli farebbe attendere RetryDelay + InterSliceDelay.
++                    continue;
+ 
+                 default:
+                     // Un singolo aggregato problematico non deve bloccare
+@@ -105,11 +112,16 @@ public sealed class BatchExecutionCoordinator(
+ 
+             await Task.Delay(
+                 _options.InterSliceDelay,
++                clock,
+                 ct).ConfigureAwait(false);
+         }
+ 
++        // Non "PurgeRunCompleted": il run puo' ancora dover attraversare
++        // CollectiveTail, ed e' l'orchestratore a stabilire quando e' concluso.
++        // Un evento con quel nome emesso qui anticiperebbe un fatto non avvenuto
++        // e produrrebbe due righe per lo stesso run nelle query sui log.
+         log.LogInformation(
+-            "PurgeRunCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
++            "PurgeBatchExecutionCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
+             "SliceAbbandonate={Abandoned}",
+             run.RunId,
+             totalRows,
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
+index c997bc5..f77a41a 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
+@@ -39,7 +39,7 @@ public sealed class PlanningPhase(
+         }
+ 
+         log.LogInformation(
+-            "PurgeRunCompleted RunId={RunId} Modalita=DryRun{NewLine}{Report}",
++            "PurgeDryRunReport RunId={RunId}{NewLine}{Report}",
+             run.RunId, Environment.NewLine, report.ToText());
+ 
+         return PhaseResult.Complete();
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
+index 12a97c4..64f2c3c 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
+@@ -27,7 +27,7 @@ public sealed class SelectingPhase(
+                 await dryRunReporter.ProduceAsync(run, ct).ConfigureAwait(false);
+ 
+             log.LogInformation(
+-                "PurgeRunCompleted RunId={RunId} Strategy={Strategy} Candidati=0 " +
++                "PurgeSelectionEmpty RunId={RunId} Strategy={Strategy} Candidati=0 " +
+                 "Cutoff={Cutoff:yyyy-MM-dd} — nessun ordine eleggibile.",
+                 run.RunId, run.Strategy, strategy.CutoffOf(run));
+ 
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs b/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
+index 2bea89f..32c9205 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
+@@ -48,7 +48,16 @@ public sealed class RetentionOrchestrator(
+                     await TransitionAsync(run, nextPhase, result.Error, ct).ConfigureAwait(false);
+ 
+                 if (result.Stop)
++                {
++                    // Unico punto in cui si dichiara concluso un run: le fasi
++                    // sanno cosa hanno fatto, non se il run e' finito.
++                    if (run.Phase == RunPhase.Completed)
++                        log.LogInformation(
++                            "PurgeRunCompleted RunId={RunId} Strategy={Strategy} DryRun={DryRun}",
++                            runId, run.Strategy, run.DryRun);
++
+                     return;
++                }
+ 
+                 // Stay non dovrebbe mai essere usato con Stop=false, ma il
+                 // contratto lo rende esplicito per evitare loop accidentali.

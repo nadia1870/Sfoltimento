@@ -39,7 +39,7 @@ public sealed class PlanningPhase(
         }
 
         log.LogInformation(
-            "PurgeRunCompleted RunId={RunId} Modalita=DryRun{NewLine}{Report}",
+            "PurgeDryRunReport RunId={RunId}{NewLine}{Report}",
             run.RunId, Environment.NewLine, report.ToText());
 
         return PhaseResult.Complete();

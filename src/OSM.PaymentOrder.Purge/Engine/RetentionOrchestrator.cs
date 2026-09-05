@@ -48,7 +48,16 @@ public sealed class RetentionOrchestrator(
                     await TransitionAsync(run, nextPhase, result.Error, ct).ConfigureAwait(false);
 
                 if (result.Stop)
+                {
+                    // Unico punto in cui si dichiara concluso un run: le fasi
+                    // sanno cosa hanno fatto, non se il run e' finito.
+                    if (run.Phase == RunPhase.Completed)
+                        log.LogInformation(
+                            "PurgeRunCompleted RunId={RunId} Strategy={Strategy} DryRun={DryRun}",
+                            runId, run.Strategy, run.DryRun);
+
                     return;
+                }
 
                 // Stay non dovrebbe mai essere usato con Stop=false, ma il
                 // contratto lo rende esplicito per evitare loop accidentali.
