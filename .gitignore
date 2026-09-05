@@ -1,0 +1,30 @@
+## Build
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+artifacts/
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+## Configurazione locale — NON committare: contiene host, porte e credenziali
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+
+## NuGet
+*.nupkg
+.nuget/
+packages/
+
+## Sistema
+.DS_Store
+Thumbs.db

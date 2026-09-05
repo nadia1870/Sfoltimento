@@ -1,0 +1,6 @@
+{
+  "ConnectionStrings": {
+    "PaymentOrder": "Server=<host>,<porta>;Database=<database>;Integrated Security=true;TrustServerCertificate=true"
+  },
+  "Purge": { "DryRun": true }
+}
