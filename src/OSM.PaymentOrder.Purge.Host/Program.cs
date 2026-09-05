@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Engine;
+using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 using OSM.PaymentOrder.Purge.Engine.Phases;
 using OSM.PaymentOrder.Purge.Observability;
 
@@ -101,10 +102,13 @@ public static class Program
         builder.Services.AddSingleton<IPurgeStrategy, CollectiveStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, OrphanHistoryStrategy>();
         builder.Services.AddSingleton<PurgeStrategyResolver>();
+builder.Services.AddSingleton<IPurgeStrategyResolver>(sp => sp.GetRequiredService<PurgeStrategyResolver>());
         builder.Services.AddSingleton<PreDeleteValidator>();
         builder.Services.AddSingleton<BatchPlanner>();
         builder.Services.AddSingleton<DryRunReporter>();
         builder.Services.AddSingleton<SliceExecutor>();
+        builder.Services.AddSingleton<BatchExecutionCoordinator>();
+        builder.Services.AddSingleton<IBatchExecutionCoordinator>(sp => sp.GetRequiredService<BatchExecutionCoordinator>());
         builder.Services.AddSingleton<CollectiveTailExecutor>();
         builder.Services.AddSingleton<IPurgePhase, SelectingPhase>();
         builder.Services.AddSingleton<IPurgePhase, ExpandingPhase>();

@@ -1,0 +1,14 @@
+*** Begin Patch
+*** Update File: tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+@@
+ using OSM.PaymentOrder.Purge.Data;
+ using OSM.PaymentOrder.Purge.Engine;
++using OSM.PaymentOrder.Purge.Engine.BatchExecution;
+ using OSM.PaymentOrder.Purge.Engine.Phases;
+ using OSM.PaymentOrder.Purge.Observability;
+@@
+         services.AddSingleton<DryRunReporter>();
+         services.AddSingleton<SliceExecutor>();
++        services.AddSingleton<BatchExecutionCoordinator>();
+         services.AddSingleton<CollectiveTailExecutor>();
+*** End Patch

@@ -1,0 +1,15 @@
+// In OSM.PaymentOrder.Purge.Host/Program.cs:
+//
+// sostituire:
+//     builder.Services.AddSingleton<ExecutingPhase>();
+//
+// se presente, e mantenere la registrazione IPurgePhase:
+//
+//     builder.Services.AddSingleton<BatchExecutionCoordinator>();
+//     builder.Services.AddSingleton<IPurgePhase, ExecutingPhase>();
+//
+// Il coordinator è una dipendenza diretta di ExecutingPhase.
+// La registrazione di CollectiveTailExecutor/CollectiveTailPhase NON viene
+// rimossa in questo passaggio: restano compatibilità per run V5 precedenti.
+// I nuovi run non entrano nel tail perché CollectiveStrategy
+// ha RequiresCollectiveTail == false.

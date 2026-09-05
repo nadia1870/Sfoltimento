@@ -228,7 +228,12 @@ public sealed class OrphanHistoryStrategy(SqlExecutor sql, ILogger<OrphanHistory
 }
 
 /// <summary>Risoluzione centralizzata della strategy tramite DI.</summary>
-public sealed class PurgeStrategyResolver(IEnumerable<IPurgeStrategy> strategies)
+public interface IPurgeStrategyResolver
+{
+    IPurgeStrategy Resolve(RetentionStrategy strategy);
+}
+
+public sealed class PurgeStrategyResolver(IEnumerable<IPurgeStrategy> strategies) : IPurgeStrategyResolver
 {
     private readonly IReadOnlyDictionary<RetentionStrategy, IPurgeStrategy> _strategies =
         strategies.ToDictionary(x => x.Type);
