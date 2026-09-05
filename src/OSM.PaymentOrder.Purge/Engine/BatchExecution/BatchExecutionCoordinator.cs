@@ -21,6 +21,7 @@ public sealed class BatchExecutionCoordinator(
     IBatchExecutor executor,
     PurgeMetrics metrics,
     IOptions<PurgeOptions> options,
+    TimeProvider clock,
     ILogger<BatchExecutionCoordinator> log) : IBatchExecutionCoordinator
 {
     private readonly PurgeOptions _options = options.Value;
@@ -33,9 +34,14 @@ public sealed class BatchExecutionCoordinator(
         var abandoned = 0;
         long totalRows = 0;
 
-        while (!ct.IsCancellationRequested)
+        while (true)
         {
-            if (!_options.IsWithinWindow(DateTimeOffset.Now))
+            // A cancellation is a control-flow signal, not a successful run completion.
+            // Check it explicitly before each iteration so we never fall through to
+            // CompletedRun after the token has been cancelled.
+            ct.ThrowIfCancellationRequested();
+
+            if (!_options.IsWithinWindow(clock.GetLocalNow()))
             {
                 log.LogInformation(
                     "Fine finestra operativa: RunId={RunId} sospeso, slice completate={Completed}",
