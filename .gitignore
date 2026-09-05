@@ -28,3 +28,6 @@ packages/
 ## Sistema
 .DS_Store
 Thumbs.db
+
+# backup degli script di correzione
+*.bak
