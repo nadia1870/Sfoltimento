@@ -3,6 +3,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge", "s
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge.Host", "src\OSM.PaymentOrder.Purge.Host\OSM.PaymentOrder.Purge.Host.csproj", "{A1000000-0000-0000-0000-000000000002}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge.Tests", "tests\OSM.PaymentOrder.Purge.Tests\OSM.PaymentOrder.Purge.Tests.csproj", "{A1000000-0000-0000-0000-000000000003}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -17,5 +19,9 @@ Global
 		{A1000000-0000-0000-0000-000000000002}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A1000000-0000-0000-0000-000000000002}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A1000000-0000-0000-0000-000000000002}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A1000000-0000-0000-0000-000000000003}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A1000000-0000-0000-0000-000000000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A1000000-0000-0000-0000-000000000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A1000000-0000-0000-0000-000000000003}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

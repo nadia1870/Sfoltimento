@@ -1,0 +1,895 @@
+diff --git a/OSM.PaymentOrder.Purge.sln b/OSM.PaymentOrder.Purge.sln
+index 3f29be5..0e39bc9 100644
+--- a/OSM.PaymentOrder.Purge.sln
++++ b/OSM.PaymentOrder.Purge.sln
+@@ -3,6 +3,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge", "s
+ EndProject
+ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge.Host", "src\OSM.PaymentOrder.Purge.Host\OSM.PaymentOrder.Purge.Host.csproj", "{A1000000-0000-0000-0000-000000000002}"
+ EndProject
++Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OSM.PaymentOrder.Purge.Tests", "tests\OSM.PaymentOrder.Purge.Tests\OSM.PaymentOrder.Purge.Tests.csproj", "{A1000000-0000-0000-0000-000000000003}"
++EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+ 		Debug|Any CPU = Debug|Any CPU
+@@ -17,5 +19,9 @@ Global
+ 		{A1000000-0000-0000-0000-000000000002}.Debug|Any CPU.Build.0 = Debug|Any CPU
+ 		{A1000000-0000-0000-0000-000000000002}.Release|Any CPU.ActiveCfg = Release|Any CPU
+ 		{A1000000-0000-0000-0000-000000000002}.Release|Any CPU.Build.0 = Release|Any CPU
++		{A1000000-0000-0000-0000-000000000003}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
++		{A1000000-0000-0000-0000-000000000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
++		{A1000000-0000-0000-0000-000000000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
++		{A1000000-0000-0000-0000-000000000003}.Release|Any CPU.Build.0 = Release|Any CPU
+ 	EndGlobalSection
+ EndGlobal
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/010_test_schema.sql b/tests/OSM.PaymentOrder.Purge.Tests/010_test_schema.sql
+new file mode 100644
+index 0000000..b91eb26
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/010_test_schema.sql
+@@ -0,0 +1,287 @@
++/* =====================================================================
++   Schema PaymentOrder per i test di integrazione.
++
++   Derivato dallo snapshot EF: contiene SOLO le colonne che il motore
++   interroga, ma la TOPOLOGIA DELLE FOREIGN KEY e' identica a quella reale.
++   E' la topologia l'oggetto sotto test, non i tipi delle colonne.
++
++   Verificare periodicamente con db/004_verify_fk.sql che il database reale
++   non abbia divergenze: se le acquisisce, questo file va aggiornato.
++   ===================================================================== */
++
++IF SCHEMA_ID('PaymentOrder') IS NULL EXEC('CREATE SCHEMA PaymentOrder');
++GO
++
++CREATE TABLE PaymentOrder.[Order] (
++    Id                 UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_Order PRIMARY KEY,
++    Code               NVARCHAR(50)     NOT NULL CONSTRAINT UQ_Order_Code UNIQUE,
++    StatusCode         NVARCHAR(50)     NOT NULL,
++    TypeCode           NVARCHAR(100)    NOT NULL CONSTRAINT DF_Order_Type DEFAULT('BankTransfer'),
++    StandingOrder      BIT              NOT NULL CONSTRAINT DF_Order_SO   DEFAULT(0),
++    CollectiveOrder    BIT              NOT NULL CONSTRAINT DF_Order_CO   DEFAULT(0),
++    CreationDate       DATETIME2        NOT NULL,
++    ExecutionDate      DATETIME2        NOT NULL,   -- NOT NULL come in produzione
++    DebtorAccountRelNr INT              NOT NULL CONSTRAINT DF_Order_Rel  DEFAULT(0),
++    CreatedOn          DATETIME2        NOT NULL CONSTRAINT DF_Order_CrOn DEFAULT(SYSDATETIME()),
++    UpdatedOn          DATETIME2        NOT NULL CONSTRAINT DF_Order_UpOn DEFAULT(SYSDATETIME())
++);
++
++CREATE TABLE PaymentOrder.OrderHistory (
++    Id                 UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_OrderHistory PRIMARY KEY,
++    OrderRefId         UNIQUEIDENTIFIER NULL,      -- nullable: storici orfani (C1)
++    Code               NVARCHAR(50)     NOT NULL,
++    StatusCode         NVARCHAR(50)     NOT NULL,
++    DebtorAccountRelNr INT              NOT NULL CONSTRAINT DF_OH_Rel DEFAULT(0),
++    UpdatedOn          DATETIME2        NOT NULL CONSTRAINT DF_OH_UpOn DEFAULT(SYSDATETIME()),
++    CONSTRAINT FK_OrderHistory_Order_OrderRefId
++        FOREIGN KEY (OrderRefId) REFERENCES PaymentOrder.[Order](Id)
++);
++
++CREATE TABLE PaymentOrder.Category (
++    Id                 UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_Category PRIMARY KEY,
++    Name               NVARCHAR(255)    NOT NULL,
++    RelationshipNumber INT              NOT NULL CONSTRAINT DF_Cat_Rel DEFAULT(0)
++);
++
++/* Model.OrderId e' l'UNICA cascata dello schema (caso C5): senza l'esclusione
++   applicativa dei candidati referenziati da Model, cancellare un ordine
++   distruggerebbe silenziosamente il template dell'utente. */
++CREATE TABLE PaymentOrder.Model (
++    Id                 UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_Model PRIMARY KEY,
++    OrderId            UNIQUEIDENTIFIER NOT NULL,
++    CategoryId         UNIQUEIDENTIFIER NULL,
++    Name               NVARCHAR(255)    NOT NULL,
++    RelationshipNumber INT              NOT NULL CONSTRAINT DF_Model_Rel DEFAULT(0),
++    CONSTRAINT FK_Model_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id) ON DELETE CASCADE,
++    CONSTRAINT FK_Model_Category_CategoryId
++        FOREIGN KEY (CategoryId) REFERENCES PaymentOrder.Category(Id)
++);
++GO
++CREATE TABLE PaymentOrder.AccountTransfer (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_AccountTransfer PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_AccountTransfer_OrderId UNIQUE,
++    CONSTRAINT FK_AccountTransfer_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.BankTransfer (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_BankTransfer PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_BankTransfer_OrderId UNIQUE,
++    CONSTRAINT FK_BankTransfer_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.BankTransferToCornerCard (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_BankTransferToCornerCard PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_BankTransferToCornerCard_OrderId UNIQUE,
++    CONSTRAINT FK_BankTransferToCornerCard_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.ForeignBankTransfer (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ForeignBankTransfer PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_ForeignBankTransfer_OrderId UNIQUE,
++    CONSTRAINT FK_ForeignBankTransfer_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.InpaymentSlip (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_InpaymentSlip PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_InpaymentSlip_OrderId UNIQUE,
++    CONSTRAINT FK_InpaymentSlip_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.IpBankTransfer (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_IpBankTransfer PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_IpBankTransfer_OrderId UNIQUE,
++    CONSTRAINT FK_IpBankTransfer_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.IpQRBill (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_IpQRBill PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_IpQRBill_OrderId UNIQUE,
++    CONSTRAINT FK_IpQRBill_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.QRBill (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_QRBill PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_QRBill_OrderId UNIQUE,
++    CONSTRAINT FK_QRBill_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.RealTimeCardReload (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_RealTimeCardReload PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_RealTimeCardReload_OrderId UNIQUE,
++    CONSTRAINT FK_RealTimeCardReload_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE TABLE PaymentOrder.StandingOrder (
++    Id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_StandingOrder PRIMARY KEY,
++    OrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_StandingOrder_OrderId UNIQUE,
++    CONSTRAINT FK_StandingOrder_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++/* StandingOrder porta le colonne del piano: LastExecutionDate NULL significa
++   piano senza scadenza, quindi non eleggibile per quanto vecchia sia la testata. */
++ALTER TABLE PaymentOrder.StandingOrder ADD
++    FirstExecutionDate DATETIME2 NOT NULL CONSTRAINT DF_SO_First DEFAULT(SYSDATETIME()),
++    LastExecutionDate  DATETIME2 NULL;
++GO
++
++CREATE TABLE PaymentOrder.CollectiveOrder (
++    Id               UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_CollectiveOrder PRIMARY KEY,
++    StatusCode       NVARCHAR(50)     NOT NULL,
++    ExecutionDate    DATETIME2        NULL,   -- nullable, a differenza di Order (C8)
++    TotalAmount      DECIMAL(18,2)    NOT NULL CONSTRAINT DF_CO_Tot DEFAULT(0),
++    TransactionCount INT              NOT NULL CONSTRAINT DF_CO_Cnt DEFAULT(0)
++);
++
++CREATE TABLE PaymentOrder.CollectiveOrderContent (
++    Id                UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_COContent PRIMARY KEY,
++    CollectiveOrderId UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_COContent UNIQUE,
++    [File]            VARBINARY(MAX)   NULL,
++    CONSTRAINT FK_CollectiveOrderContent_CollectiveOrder_CollectiveOrderId
++        FOREIGN KEY (CollectiveOrderId) REFERENCES PaymentOrder.CollectiveOrder(Id)
++);
++
++CREATE TABLE PaymentOrder.CollectiveOrderHistory (
++    Id                   UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_COHistory PRIMARY KEY,
++    CollectiveOrderRefId UNIQUEIDENTIFIER NOT NULL,
++    StatusCode           NVARCHAR(50)     NOT NULL,
++    CONSTRAINT FK_CollectiveOrderHistory_CollectiveOrder_CollectiveOrderRefId
++        FOREIGN KEY (CollectiveOrderRefId) REFERENCES PaymentOrder.CollectiveOrder(Id)
++);
++
++CREATE TABLE PaymentOrder.CollectiveOrderGroup (
++    Id                UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_COGroup PRIMARY KEY,
++    CollectiveOrderId UNIQUEIDENTIFIER NOT NULL,
++    Code              NVARCHAR(20)     NOT NULL,
++    CONSTRAINT FK_CollectiveOrderGroup_CollectiveOrder_CollectiveOrderId
++        FOREIGN KEY (CollectiveOrderId) REFERENCES PaymentOrder.CollectiveOrder(Id)
++);
++
++CREATE TABLE PaymentOrder.CollectiveOrderGroupHistory (
++    Id                        UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_COGHistory PRIMARY KEY,
++    CollectiveOrderGroupRefId UNIQUEIDENTIFIER NOT NULL,
++    Code                      NVARCHAR(20)     NOT NULL,
++    CONSTRAINT FK_CollectiveOrderGroupHistory_CollectiveOrderGroup_CollectiveOrderGroupRefId
++        FOREIGN KEY (CollectiveOrderGroupRefId) REFERENCES PaymentOrder.CollectiveOrderGroup(Id)
++);
++
++/* OrderId nullable: righe respinte in validazione (C3/C12). Non diventano mai
++   Order, quindi non entrano nello staging e il gruppo 3 non le tocca: e' il
++   caso che faceva fallire la coda del collettivo con violazione di FK. */
++CREATE TABLE PaymentOrder.CollectiveOrderGroupOrder (
++    Id                      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_COGOrder PRIMARY KEY,
++    CollectiveOrderGroupId  UNIQUEIDENTIFIER NOT NULL,
++    OrderId                 UNIQUEIDENTIFIER NULL,
++    OrderType               NVARCHAR(50)     NULL,
++    ValidationErrors        NVARCHAR(2000)   NULL,
++    CONSTRAINT FK_CollectiveOrderGroupOrder_CollectiveOrderGroup_CollectiveOrderGroupId
++        FOREIGN KEY (CollectiveOrderGroupId) REFERENCES PaymentOrder.CollectiveOrderGroup(Id),
++    CONSTRAINT FK_CollectiveOrderGroupOrder_Order_OrderId
++        FOREIGN KEY (OrderId) REFERENCES PaymentOrder.[Order](Id)
++);
++CREATE UNIQUE INDEX UQ_COGOrder_OrderId ON PaymentOrder.CollectiveOrderGroupOrder(OrderId)
++    WHERE OrderId IS NOT NULL;
++GO
++/* Gruppo 1 — il doppio vincolo: ogni storico referenzia SIA OrderHistory
++   SIA il dettaglio corrente, entrambi con NO ACTION. Sono le foglie del
++   grafo e bloccano due rami contemporaneamente. */
++CREATE TABLE PaymentOrder.AccountTransferHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_AccountTransferHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    AccountTransferRefId           UNIQUEIDENTIFIER NULL    ,
++    CONSTRAINT FK_AccountTransferHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_AccountTransferHistory_AccountTransfer_AccountTransferRefId
++        FOREIGN KEY (AccountTransferRefId) REFERENCES PaymentOrder.AccountTransfer(Id)
++);
++CREATE TABLE PaymentOrder.BankTransferHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_BankTransferHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    BankTransferRefId              UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_BankTransferHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_BankTransferHistory_BankTransfer_BankTransferRefId
++        FOREIGN KEY (BankTransferRefId) REFERENCES PaymentOrder.BankTransfer(Id)
++);
++CREATE TABLE PaymentOrder.BankTransferToCornerCardHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_BankTransferToCornerCardHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    BankTransferToCornerCardRefId  UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_BankTransferToCornerCardHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_BankTransferToCornerCardHistory_BankTransferToCornerCard_BankTransferToCornerCardRefId
++        FOREIGN KEY (BankTransferToCornerCardRefId) REFERENCES PaymentOrder.BankTransferToCornerCard(Id)
++);
++CREATE TABLE PaymentOrder.ForeignBankTransferHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ForeignBankTransferHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    ForeignBankTransferRefId       UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_ForeignBankTransferHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_ForeignBankTransferHistory_ForeignBankTransfer_ForeignBankTransferRefId
++        FOREIGN KEY (ForeignBankTransferRefId) REFERENCES PaymentOrder.ForeignBankTransfer(Id)
++);
++CREATE TABLE PaymentOrder.InpaymentSlipHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_InpaymentSlipHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    InpaymentSlipRefId             UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_InpaymentSlipHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_InpaymentSlipHistory_InpaymentSlip_InpaymentSlipRefId
++        FOREIGN KEY (InpaymentSlipRefId) REFERENCES PaymentOrder.InpaymentSlip(Id)
++);
++CREATE TABLE PaymentOrder.IpBankTransferHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_IpBankTransferHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    IpBankTransferRefId            UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_IpBankTransferHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_IpBankTransferHistory_IpBankTransfer_IpBankTransferRefId
++        FOREIGN KEY (IpBankTransferRefId) REFERENCES PaymentOrder.IpBankTransfer(Id)
++);
++CREATE TABLE PaymentOrder.IpQRBillHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_IpQRBillHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    IpQRBillRefId                  UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_IpQRBillHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_IpQRBillHistory_IpQRBill_IpQRBillRefId
++        FOREIGN KEY (IpQRBillRefId) REFERENCES PaymentOrder.IpQRBill(Id)
++);
++CREATE TABLE PaymentOrder.QRBillHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_QRBillHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    QRBillRefId                    UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_QRBillHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_QRBillHistory_QRBill_QRBillRefId
++        FOREIGN KEY (QRBillRefId) REFERENCES PaymentOrder.QRBill(Id)
++);
++CREATE TABLE PaymentOrder.RealTimeCardReloadHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_RealTimeCardReloadHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    RealTimeCardReloadRefId        UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_RealTimeCardReloadHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_RealTimeCardReloadHistory_RealTimeCardReload_RealTimeCardReloadRefId
++        FOREIGN KEY (RealTimeCardReloadRefId) REFERENCES PaymentOrder.RealTimeCardReload(Id)
++);
++CREATE TABLE PaymentOrder.StandingOrderHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_StandingOrderHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NOT NULL,
++    StandingOrderRefId             UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_StandingOrderHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_StandingOrderHistory_StandingOrder_StandingOrderRefId
++        FOREIGN KEY (StandingOrderRefId) REFERENCES PaymentOrder.StandingOrder(Id)
++);
++CREATE TABLE PaymentOrder.CollectiveOrderGroupOrderHistory (
++    Id             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_CollectiveOrderGroupOrderHistory PRIMARY KEY,
++    OrderHistoryId UNIQUEIDENTIFIER NULL,
++    CollectiveOrderGroupOrderRefId UNIQUEIDENTIFIER NOT NULL,
++    CONSTRAINT FK_CollectiveOrderGroupOrderHistory_OrderHistory_OrderHistoryId
++        FOREIGN KEY (OrderHistoryId) REFERENCES PaymentOrder.OrderHistory(Id),
++    CONSTRAINT FK_CollectiveOrderGroupOrderHistory_CollectiveOrderGroupOrder_CollectiveOrderGroupOrderRefId
++        FOREIGN KEY (CollectiveOrderGroupOrderRefId) REFERENCES PaymentOrder.CollectiveOrderGroupOrder(Id)
++);
++GO
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/OSM.PaymentOrder.Purge.Tests.csproj b/tests/OSM.PaymentOrder.Purge.Tests/OSM.PaymentOrder.Purge.Tests.csproj
+new file mode 100644
+index 0000000..ff4f0e8
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/OSM.PaymentOrder.Purge.Tests.csproj
+@@ -0,0 +1,34 @@
++<Project Sdk="Microsoft.NET.Sdk">
++
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <Nullable>enable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <IsPackable>false</IsPackable>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
++    <PackageReference Include="xunit" Version="2.9.2" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
++    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
++    <PackageReference Include="Microsoft.Extensions.Diagnostics" Version="10.0.0" />
++    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
++    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="..\..\src\OSM.PaymentOrder.Purge\OSM.PaymentOrder.Purge.csproj" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <None Update="010_test_schema.sql"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
++    <None Include="..\..\db\001_purge_schema.sql" Link="001_purge_schema.sql">
++      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
++    <None Include="..\..\db\005_housekeeping.sql" Link="005_housekeeping.sql">
++      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
++    <None Include="..\..\db\006_collective_atomicity.sql" Link="006_collective_atomicity.sql">
++      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
++  </ItemGroup>
++
++</Project>
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+new file mode 100644
+index 0000000..4a9d69d
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+@@ -0,0 +1,146 @@
++using System.Text.RegularExpressions;
++using Microsoft.Data.SqlClient;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging;
++using Microsoft.Extensions.Options;
++using OSM.PaymentOrder.Purge.Data;
++using OSM.PaymentOrder.Purge.Engine;
++using OSM.PaymentOrder.Purge.Engine.Phases;
++using OSM.PaymentOrder.Purge.Observability;
++
++namespace OSM.PaymentOrder.Purge.Tests;
++
++/// <summary>
++/// Crea un database dedicato per l'intera sessione di test e lo distrugge alla
++/// fine. Non tocca alcun database esistente.
++///
++/// L'istanza si configura con la variabile d'ambiente PURGE_TEST_SQL; il default
++/// punta a LocalDB. Il nome del database include un suffisso casuale, cosi' due
++/// esecuzioni concorrenti non si disturbano.
++///
++/// Un database in-memory non avrebbe alcun valore probante: e' proprio la
++/// topologia delle foreign key l'oggetto sotto test.
++/// </summary>
++public sealed class PurgeDatabaseFixture : IAsyncLifetime
++{
++    private static readonly string MasterConnection =
++        Environment.GetEnvironmentVariable("PURGE_TEST_SQL")
++        ?? @"Server=(localdb)\MSSQLLocalDB;Database=master;Integrated Security=true;TrustServerCertificate=true";
++
++    public string DatabaseName { get; } = $"PurgeTests_{Guid.NewGuid():N}"[..24];
++    public string ConnectionString { get; private set; } = string.Empty;
++    public ServiceProvider Services { get; private set; } = null!;
++    public SqlExecutor Sql { get; private set; } = null!;
++
++    public async ValueTask InitializeAsync()
++    {
++        await ExecuteOnMasterAsync($"CREATE DATABASE [{DatabaseName}];");
++
++        var builder = new SqlConnectionStringBuilder(MasterConnection) { InitialCatalog = DatabaseName };
++        ConnectionString = builder.ConnectionString;
++        Sql = new SqlExecutor(ConnectionString);
++
++        foreach (var script in new[]
++                 { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
++                   "006_collective_atomicity.sql" })
++        {
++            await RunScriptAsync(script);
++        }
++
++        Services = BuildServices();
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        await Services.DisposeAsync();
++        // SINGLE_USER ROLLBACK IMMEDIATE: le connessioni del pool restano aperte
++        // e senza questo la DROP fallirebbe.
++        await ExecuteOnMasterAsync(
++            $"ALTER DATABASE [{DatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; " +
++            $"DROP DATABASE [{DatabaseName}];");
++    }
++
++    public PurgeOptions Options => Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
++    public RetentionOrchestrator Orchestrator => Services.GetRequiredService<RetentionOrchestrator>();
++    public PurgeRunStore Store => Services.GetRequiredService<PurgeRunStore>();
++
++    private ServiceProvider BuildServices()
++    {
++        var services = new ServiceCollection();
++
++        services.AddLogging(b => b.AddSimpleConsole().SetMinimumLevel(LogLevel.Warning));
++        services.AddSingleton(TimeProvider.System);
++        services.AddMetrics();
++        services.AddSingleton<PurgeMetrics>();
++        services.AddSingleton(new SqlExecutor(ConnectionString));
++
++        services.AddOptions<PurgeOptions>().Configure(o =>
++        {
++            o.DryRun = false;
++            o.WindowEnabled = false;      // i test non dipendono dall'ora
++            o.HousekeepingEnabled = false;
++            o.MaxRowsPerBatch = 50;       // valori piccoli: piu' slice, piu' copertura
++            o.MaxOrdersPerBatch = 10;
++            o.InterSliceDelay = TimeSpan.Zero;
++            o.RetryDelay = TimeSpan.Zero;
++        });
++
++        services.AddSingleton<SchemaVerifier>();
++        services.AddSingleton<PurgeHousekeeping>();
++        services.AddSingleton<PurgeRunStore>();
++        services.AddSingleton<IPurgeStrategy, TerminatedStrategy>();
++        services.AddSingleton<IPurgeStrategy, AbandonedStrategy>();
++        services.AddSingleton<IPurgeStrategy, StandingOrdersStrategy>();
++        services.AddSingleton<IPurgeStrategy, CollectiveStrategy>();
++        services.AddSingleton<IPurgeStrategy, OrphanHistoryStrategy>();
++        services.AddSingleton<PurgeStrategyResolver>();
++        services.AddSingleton<PreDeleteValidator>();
++        services.AddSingleton<BatchPlanner>();
++        services.AddSingleton<DryRunReporter>();
++        services.AddSingleton<SliceExecutor>();
++        services.AddSingleton<CollectiveTailExecutor>();
++        services.AddSingleton<IPurgePhase, SelectingPhase>();
++        services.AddSingleton<IPurgePhase, ExpandingPhase>();
++        services.AddSingleton<IPurgePhase, ValidatingPhase>();
++        services.AddSingleton<IPurgePhase, PlanningPhase>();
++        services.AddSingleton<IPurgePhase, ExecutingPhase>();
++        services.AddSingleton<IPurgePhase, CollectiveTailPhase>();
++        services.AddSingleton<PurgeExecutionLock>();
++        services.AddSingleton<RetentionOrchestrator>();
++
++        return services.BuildServiceProvider();
++    }
++
++    private async Task RunScriptAsync(string fileName)
++    {
++        var path = Path.Combine(AppContext.BaseDirectory, fileName);
++        var text = await File.ReadAllTextAsync(path);
++
++        // Il separatore GO non e' T-SQL: va interpretato qui.
++        var batches = Regex.Split(text, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase);
++
++        await using var conn = new SqlConnection(ConnectionString);
++        await conn.OpenAsync();
++
++        foreach (var batch in batches.Where(b => !string.IsNullOrWhiteSpace(b)))
++        {
++            await using var cmd = conn.CreateCommand();
++            cmd.CommandText = batch;
++            cmd.CommandTimeout = 120;
++            await cmd.ExecuteNonQueryAsync();
++        }
++    }
++
++    private static async Task ExecuteOnMasterAsync(string sql)
++    {
++        await using var conn = new SqlConnection(MasterConnection);
++        await conn.OpenAsync();
++        await using var cmd = conn.CreateCommand();
++        cmd.CommandText = sql;
++        cmd.CommandTimeout = 120;
++        await cmd.ExecuteNonQueryAsync();
++    }
++}
++
++[CollectionDefinition("PurgeDatabase")]
++public sealed class PurgeDatabaseCollection : ICollectionFixture<PurgeDatabaseFixture>;
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/RetentionInvariantsTests.cs b/tests/OSM.PaymentOrder.Purge.Tests/RetentionInvariantsTests.cs
+new file mode 100644
+index 0000000..6cb80e4
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/RetentionInvariantsTests.cs
+@@ -0,0 +1,197 @@
++using Microsoft.Extensions.DependencyInjection;
++using OSM.PaymentOrder.Purge.Data;
++using OSM.PaymentOrder.Purge.Domain;
++using OSM.PaymentOrder.Purge.Engine;
++
++namespace OSM.PaymentOrder.Purge.Tests;
++
++/// <summary>
++/// I cinque invarianti che l'analisi identifica come critici. Ognuno
++/// corrisponde a un difetto realmente comparso durante lo sviluppo: sono test
++/// di regressione, non esercizi teorici.
++/// </summary>
++[Collection("PurgeDatabase")]
++public sealed class RetentionInvariantsTests(PurgeDatabaseFixture db)
++{
++    private SeedBuilder Seed => new(db.Sql);
++
++    private async Task<PurgeRun> RunAsync(RetentionStrategy strategy)
++    {
++        var runId = await db.Store.CreateAsync(
++            strategy, db.Options, DateTimeOffset.Now, default);
++
++        await db.Orchestrator.RunAsync(runId, default);
++        return await db.Store.LoadAsync(runId, default);
++    }
++
++    /// <summary>
++    /// Il run deve chiudersi in Completed.
++    ///
++    /// ExecutingPhase restituiva Next(RunPhase.Completed), che lascia
++    /// Stop = false: l'orchestratore proseguiva il ciclo, non trovava un
++    /// handler per Completed e marcava Failed ogni run riuscito.
++    /// </summary>
++    [Fact]
++    public async Task Run_riuscito_termina_in_Completed()
++    {
++        await Seed.AddOrderAsync(revisions: 2);
++        await Seed.AddOrderAsync(revisions: 0);
++
++        var run = await RunAsync(RetentionStrategy.Terminated);
++
++        Assert.Equal(RunPhase.Completed, run.Phase);
++    }
++
++    /// <summary>Nessuna riga deve sopravvivere al proprio padre.</summary>
++    [Theory]
++    [InlineData("BankTransfer")]
++    [InlineData("AccountTransfer")]
++    [InlineData("ForeignBankTransfer")]
++    [InlineData("QRBill")]
++    [InlineData("IpQRBill")]
++    public async Task Cancellazione_non_lascia_orfani(string detailTable)
++    {
++        for (var i = 0; i < 5; i++)
++            await Seed.AddOrderAsync(revisions: 3, detailTable: detailTable);
++
++        await RunAsync(RetentionStrategy.Terminated);
++
++        Assert.Equal(0, await Seed.CountAsync("[Order]"));
++        Assert.Equal(0, await Seed.CountAsync("OrderHistory"));
++        Assert.Equal(0, await Seed.CountAsync(detailTable));
++        Assert.Equal(0, await Seed.CountAsync($"{detailTable}History"));
++        Assert.Equal(0, await Seed.CountOrphanRowsAsync());
++    }
++
++    /// <summary>
++    /// Un ordine referenziato da Model non deve entrare fra i candidati:
++    /// Model.OrderId e' in CASCADE e la cancellazione distruggerebbe il
++    /// template senza che nulla lo segnali (caso C5).
++    /// </summary>
++    [Fact]
++    public async Task Ordine_referenziato_da_Model_non_viene_cancellato()
++    {
++        var protetto = await Seed.AddOrderAsync(revisions: 1);
++        await Seed.AddModelAsync(protetto);
++        await Seed.AddOrderAsync(revisions: 1);
++
++        await RunAsync(RetentionStrategy.Terminated);
++
++        Assert.Equal(1, await Seed.CountAsync("[Order]"));
++        Assert.Equal(1, await Seed.CountAsync("Model"));
++    }
++
++    /// <summary>
++    /// Un piano ricorrente senza LastExecutionDate e' attivo e non e'
++    /// eleggibile, per quanto vecchia sia la testata. E' il rischio funzionale
++    /// piu' grave dell'intera soluzione.
++    /// </summary>
++    [Fact]
++    public async Task Piano_ricorrente_attivo_non_viene_cancellato()
++    {
++        await Seed.AddOrderAsync(standingOrder: true, lastExecutionDate: null);
++        await Seed.AddOrderAsync(standingOrder: true,
++            lastExecutionDate: DateTime.Today.AddYears(-8));
++
++        await RunAsync(RetentionStrategy.StandingOrders);
++
++        Assert.Equal(1, await Seed.CountAsync("[Order]"));
++        Assert.Equal(1, await Seed.CountAsync("StandingOrder"));
++    }
++
++    /// <summary>
++    /// Un collettivo con righe respinte in validazione: quelle righe hanno
++    /// OrderId NULL, non entrano nello staging e il gruppo 3 non le tocca.
++    /// Senza gli statement residui la DELETE su CollectiveOrderGroup fallisce
++    /// con violazione di foreign key (casi C3 e C12).
++    /// </summary>
++    [Fact]
++    public async Task Collettivo_con_righe_scartate_viene_cancellato_integralmente()
++    {
++        await Seed.AddCollectiveAsync(components: 4, rejectedRows: 2);
++
++        var run = await RunAsync(RetentionStrategy.Collective);
++
++        Assert.Equal(RunPhase.Completed, run.Phase);
++        Assert.Equal(0, await Seed.CountAsync("CollectiveOrder"));
++        Assert.Equal(0, await Seed.CountAsync("CollectiveOrderGroup"));
++        Assert.Equal(0, await Seed.CountAsync("CollectiveOrderGroupOrder"));
++        Assert.Equal(0, await Seed.CountAsync("[Order]"));
++        Assert.Equal(0, await Seed.CountOrphanRowsAsync());
++    }
++
++    /// <summary>
++    /// Se un componente non e' eleggibile, l'intero collettivo viene rinviato:
++    /// TotalAmount e TransactionCount sono aggregati denormalizzati e
++    /// cancellare parzialmente li renderebbe incoerenti (caso C10).
++    /// </summary>
++    [Fact]
++    public async Task Collettivo_con_componente_non_eleggibile_resta_intatto()
++    {
++        await Seed.AddCollectiveAsync(components: 3, componentStatus: "Processing");
++
++        await RunAsync(RetentionStrategy.Collective);
++
++        Assert.Equal(1, await Seed.CountAsync("CollectiveOrder"));
++        Assert.Equal(3, await Seed.CountAsync("[Order]"));
++    }
++
++    /// <summary>Storici orfani: nessun aggregato da preservare, cancellazione diretta.</summary>
++    [Fact]
++    public async Task Storici_orfani_vengono_sfoltiti()
++    {
++        for (var i = 0; i < 3; i++) await Seed.AddOrphanHistoryAsync();
++        await Seed.AddOrderAsync(revisions: 2);   // storici NON orfani
++
++        await RunAsync(RetentionStrategy.OrphanHistory);
++
++        Assert.Equal(2, await Seed.CountAsync("OrderHistory"));
++        Assert.Equal(1, await Seed.CountAsync("[Order]"));
++    }
++
++    /// <summary>Il piano rispetta entrambi i tetti, salvo gli aggregati oversized.</summary>
++    [Fact]
++    public async Task Il_piano_rispetta_entrambi_i_tetti()
++    {
++        for (var i = 0; i < 40; i++) await Seed.AddOrderAsync(revisions: 2);
++
++        var runId = await db.Store.CreateAsync(
++            RetentionStrategy.Terminated, db.Options, DateTimeOffset.Now, default);
++        await db.Orchestrator.RunAsync(runId, default);
++
++        var slices = await db.Sql.QueryAsync("""
++            SELECT OrderCount, EstimatedRowCount, IsOversized
++            FROM Purge.RunBatchProgress WHERE RunId = @RunId;
++            """, r => new { Orders = r.GetInt32(0), Rows = r.GetInt32(1), Oversized = r.GetBoolean(2) },
++            default, SqlParam.Of("@RunId", runId));
++
++        Assert.NotEmpty(slices);
++        Assert.All(slices, s =>
++        {
++            if (s.Oversized) return;
++            Assert.True(s.Orders <= db.Options.MaxOrdersPerBatch,
++                $"slice con {s.Orders} ordini, tetto {db.Options.MaxOrdersPerBatch}");
++            Assert.True(s.Rows <= db.Options.MaxRowsPerBatch,
++                $"slice con {s.Rows} righe, tetto {db.Options.MaxRowsPerBatch}");
++        });
++
++        var senzaBatch = await db.Sql.ScalarAsync<long>("""
++            SELECT COUNT_BIG(*) FROM Purge.RunCandidateOrder
++            WHERE RunId = @RunId AND BatchNo IS NULL;
++            """, default, SqlParam.Of("@RunId", runId));
++
++        Assert.Equal(0, senzaBatch);
++    }
++
++    /// <summary>
++    /// La verifica dello schema deve passare: se fallisce, il file
++    /// 010_test_schema.sql ha smesso di rispecchiare PurgeTopology.
++    /// </summary>
++    [Fact]
++    public async Task Lo_schema_di_test_copre_la_topologia()
++    {
++        var missing = await db.Services.GetRequiredService<SchemaVerifier>()
++                                       .FindMissingAsync(default);
++        Assert.Empty(missing);
++    }
++}
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/SeedBuilder.cs b/tests/OSM.PaymentOrder.Purge.Tests/SeedBuilder.cs
+new file mode 100644
+index 0000000..383e1e9
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/SeedBuilder.cs
+@@ -0,0 +1,178 @@
++using OSM.PaymentOrder.Purge.Data;
++
++namespace OSM.PaymentOrder.Purge.Tests;
++
++/// <summary>Costruzione di dataset minimi ma con la topologia completa.</summary>
++public sealed class SeedBuilder(SqlExecutor sql)
++{
++    private static int _seq;
++
++    public async Task<Guid> AddOrderAsync(
++        string statusCode = "Executed",
++        DateTime? executionDate = null,
++        DateTime? creationDate = null,
++        int revisions = 0,
++        string detailTable = "BankTransfer",
++        bool standingOrder = false,
++        DateTime? lastExecutionDate = null,
++        int relationshipNumber = 0)
++    {
++        var id = Guid.NewGuid();
++        var exec = executionDate ?? DateTime.Today.AddYears(-10);
++        var creation = creationDate ?? exec;
++        var code = $"ORD{Interlocked.Increment(ref _seq):D8}";
++
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.[Order]
++                (Id, Code, StatusCode, StandingOrder, CreationDate, ExecutionDate, DebtorAccountRelNr)
++            VALUES (@Id, @Code, @Status, @SO, @Creation, @Exec, @Rel);
++            """, default,
++            SqlParam.Of("@Id", id), SqlParam.Of("@Code", code),
++            SqlParam.Of("@Status", statusCode), SqlParam.Of("@SO", standingOrder),
++            SqlParam.Of("@Creation", creation), SqlParam.Of("@Exec", exec),
++            SqlParam.Of("@Rel", relationshipNumber));
++
++        var detailId = Guid.NewGuid();
++        await sql.ExecuteAsync(
++            $"INSERT INTO PaymentOrder.{detailTable} (Id, OrderId) VALUES (@Id, @OrderId);",
++            default, SqlParam.Of("@Id", detailId), SqlParam.Of("@OrderId", id));
++
++        if (standingOrder)
++        {
++            await sql.ExecuteAsync("""
++                UPDATE PaymentOrder.StandingOrder
++                   SET FirstExecutionDate = @First, LastExecutionDate = @Last
++                 WHERE OrderId = @OrderId;
++                """, default,
++                SqlParam.Of("@First", exec), SqlParam.Of("@Last", (object?)lastExecutionDate),
++                SqlParam.Of("@OrderId", id));
++        }
++
++        for (var i = 0; i < revisions; i++)
++            await AddRevisionAsync(id, code, statusCode, detailTable, detailId);
++
++        return id;
++    }
++
++    private async Task AddRevisionAsync(
++        Guid orderId, string code, string status, string detailTable, Guid detailId)
++    {
++        var historyId = Guid.NewGuid();
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.OrderHistory (Id, OrderRefId, Code, StatusCode)
++            VALUES (@Id, @OrderRefId, @Code, @Status);
++            """, default,
++            SqlParam.Of("@Id", historyId), SqlParam.Of("@OrderRefId", orderId),
++            SqlParam.Of("@Code", code), SqlParam.Of("@Status", status));
++
++        // Il doppio vincolo: lo storico di dettaglio referenzia sia OrderHistory
++        // sia il dettaglio corrente.
++        await sql.ExecuteAsync(
++            $"""
++             INSERT INTO PaymentOrder.{detailTable}History (Id, OrderHistoryId, {detailTable}RefId)
++             VALUES (@Id, @OrderHistoryId, @RefId);
++             """, default,
++            SqlParam.Of("@Id", Guid.NewGuid()),
++            SqlParam.Of("@OrderHistoryId", historyId),
++            SqlParam.Of("@RefId", detailId));
++    }
++
++    /// <summary>Storico orfano: OrderRefId NULL, caso C1.</summary>
++    public async Task<Guid> AddOrphanHistoryAsync(DateTime? updatedOn = null)
++    {
++        var id = Guid.NewGuid();
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.OrderHistory (Id, OrderRefId, Code, StatusCode, UpdatedOn)
++            VALUES (@Id, NULL, @Code, 'Executed', @UpdatedOn);
++            """, default,
++            SqlParam.Of("@Id", id), SqlParam.Of("@Code", $"ORPH{id:N}"[..20]),
++            SqlParam.Of("@UpdatedOn", updatedOn ?? DateTime.Today.AddYears(-10)));
++        return id;
++    }
++
++    /// <summary>Template di pagamento: protegge dalla cascata di Model (C5).</summary>
++    public async Task AddModelAsync(Guid orderId)
++    {
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.Model (Id, OrderId, Name, RelationshipNumber)
++            VALUES (@Id, @OrderId, 'template', 0);
++            """, default,
++            SqlParam.Of("@Id", Guid.NewGuid()), SqlParam.Of("@OrderId", orderId));
++    }
++
++    /// <summary>
++    /// Collettivo con componenti e, opzionalmente, righe respinte in validazione
++    /// (OrderId NULL): il caso che faceva fallire la coda con violazione di FK.
++    /// </summary>
++    public async Task<Guid> AddCollectiveAsync(
++        int components, int rejectedRows = 0,
++        DateTime? executionDate = null, string statusCode = "Executed",
++        string componentStatus = "Executed")
++    {
++        var collectiveId = Guid.NewGuid();
++        var groupId = Guid.NewGuid();
++
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.CollectiveOrder (Id, StatusCode, ExecutionDate)
++            VALUES (@Id, @Status, @Exec);
++            """, default,
++            SqlParam.Of("@Id", collectiveId), SqlParam.Of("@Status", statusCode),
++            SqlParam.Of("@Exec", (object?)executionDate ?? DateTime.Today.AddYears(-10)));
++
++        await sql.ExecuteAsync("""
++            INSERT INTO PaymentOrder.CollectiveOrderGroup (Id, CollectiveOrderId, Code)
++            VALUES (@Id, @CollectiveOrderId, 'G1');
++            """, default,
++            SqlParam.Of("@Id", groupId), SqlParam.Of("@CollectiveOrderId", collectiveId));
++
++        for (var i = 0; i < components; i++)
++        {
++            var orderId = await AddOrderAsync(statusCode: componentStatus, revisions: 1);
++            await sql.ExecuteAsync("""
++                INSERT INTO PaymentOrder.CollectiveOrderGroupOrder
++                    (Id, CollectiveOrderGroupId, OrderId, OrderType)
++                VALUES (@Id, @GroupId, @OrderId, 'BankTransfer');
++                """, default,
++                SqlParam.Of("@Id", Guid.NewGuid()), SqlParam.Of("@GroupId", groupId),
++                SqlParam.Of("@OrderId", orderId));
++        }
++
++        for (var i = 0; i < rejectedRows; i++)
++        {
++            await sql.ExecuteAsync("""
++                INSERT INTO PaymentOrder.CollectiveOrderGroupOrder
++                    (Id, CollectiveOrderGroupId, OrderId, ValidationErrors)
++                VALUES (@Id, @GroupId, NULL, 'IBAN non valido');
++                """, default,
++                SqlParam.Of("@Id", Guid.NewGuid()), SqlParam.Of("@GroupId", groupId));
++        }
++
++        return collectiveId;
++    }
++
++    public Task<long> CountAsync(string table) =>
++        sql.ScalarAsync<long>($"SELECT COUNT_BIG(*) FROM PaymentOrder.{table};", default)!;
++
++    /// <summary>
++    /// Righe rimaste senza il proprio padre. Deve essere sempre zero: e'
++    /// l'invariante che l'intera topologia esiste per garantire.
++    /// </summary>
++    public async Task<long> CountOrphanRowsAsync()
++    {
++        const string q = """
++            SELECT
++              (SELECT COUNT_BIG(*) FROM PaymentOrder.BankTransfer d
++                 WHERE NOT EXISTS (SELECT 1 FROM PaymentOrder.[Order] o WHERE o.Id = d.OrderId))
++            + (SELECT COUNT_BIG(*) FROM PaymentOrder.OrderHistory h
++                 WHERE h.OrderRefId IS NOT NULL
++                   AND NOT EXISTS (SELECT 1 FROM PaymentOrder.[Order] o WHERE o.Id = h.OrderRefId))
++            + (SELECT COUNT_BIG(*) FROM PaymentOrder.BankTransferHistory bh
++                 WHERE NOT EXISTS (SELECT 1 FROM PaymentOrder.OrderHistory h WHERE h.Id = bh.OrderHistoryId));
++            """;
++        return await sql.ScalarAsync<long>(q, default);
++    }
++
++    public Task SetStatusAsync(Guid orderId, string statusCode) =>
++        sql.ExecuteAsync("UPDATE PaymentOrder.[Order] SET StatusCode = @S WHERE Id = @Id;",
++            default, SqlParam.Of("@S", statusCode), SqlParam.Of("@Id", orderId));
++}
