@@ -33,12 +33,25 @@ public sealed record PhaseResult(
     /// inesistente, quindi vengono rifiutati subito.
     /// </summary>
     public static PhaseResult Next(RunPhase phase) =>
-        phase is RunPhase.Completed or RunPhase.Failed or RunPhase.Aborted
+        RunPhases.IsTerminal(phase)
             ? throw new ArgumentException(
                 $"'{phase}' e' uno stato terminale: usare Complete() o Fail().", nameof(phase))
             : new(phase, false);
 
     public static PhaseResult Complete() => new(RunPhase.Completed, true);
+
+    /// <summary>
+    /// Il lavoro e' finito ma qualcosa e' rimasto indietro.
+    ///
+    /// Un run che abbandona delle slice chiudeva in Completed, e la differenza
+    /// viveva in una riga di log. Sono due fatti operativi distinti: nel primo
+    /// caso non c'e' niente da fare, nel secondo ci sono aggregati che nessuno
+    /// ha cancellato e che nessun run successivo ripeschera' senza che qualcuno
+    /// li guardi. L'housekeeping trattava gia' i due casi in modo diverso, ma
+    /// deducendolo da RunBatchProgress invece che dallo stato del run.
+    /// </summary>
+    public static PhaseResult CompleteWithErrors(string error) =>
+        new(RunPhase.CompletedWithErrors, true, error);
 
     public static PhaseResult Fail(string error) => new(RunPhase.Failed, true, error);
 

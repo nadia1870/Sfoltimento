@@ -34,7 +34,8 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
 
         foreach (var script in new[]
                  { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
-                   "006_collective_atomicity.sql", "008_audit_trail.sql" })
+                   "006_collective_atomicity.sql", "008_audit_trail.sql",
+                   "010_run_lifecycle.sql" })
             await RunScriptAsync(script);
 
         Services = BuildServices();
@@ -51,8 +52,30 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
     public PurgeOptions Options => Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
     public RetentionOrchestrator Orchestrator => Services.GetRequiredService<RetentionOrchestrator>();
     public PurgeRunStore Store => Services.GetRequiredService<PurgeRunStore>();
+    public BatchPlanner Planner => Services.GetRequiredService<BatchPlanner>();
     public PurgeStrategyResolver Strategies =>
         Services.GetRequiredService<PurgeStrategyResolver>();
+
+    /// <summary>
+    /// Costruisce un orchestratore con una fase sostituita. Serve a provare i
+    /// percorsi di errore: un guasto vero non si riproduce a comando, e senza
+    /// un modo di iniettarlo la distinzione fra guasto ed errore resterebbe
+    /// non verificata proprio dove conta.
+    /// </summary>
+    public RetentionOrchestrator OrchestratorWith(IPurgePhase sostituta)
+    {
+        var fasi = Services.GetServices<IPurgePhase>()
+            .Where(f => !f.HandledPhases.Overlaps(sostituta.HandledPhases))
+            .Append(sostituta);
+
+        return new RetentionOrchestrator(
+            Store,
+            fasi,
+            Strategies,
+            Services.GetRequiredService<IOptions<PurgeOptions>>(),
+            Services.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger<RetentionOrchestrator>());
+    }
 
     private ServiceProvider BuildServices()
     {

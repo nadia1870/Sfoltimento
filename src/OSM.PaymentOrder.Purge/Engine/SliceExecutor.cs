@@ -26,18 +26,28 @@ public sealed class SliceExecutor(
         var started = DateTimeOffset.UtcNow;
         var strategy = strategyResolver.Resolve(run.Strategy);
 
-        await using var conn = await sql.OpenAsync(ct).ConfigureAwait(false);
-
-        // In caso di deadlock con l'applicazione la vittima designata e' il
-        // purge, mai l'operativita'.
-        await using (var pri = sql.Command(conn, null, "SET DEADLOCK_PRIORITY LOW;"))
-            await pri.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-        await using var tx = (SqlTransaction)await conn
-            .BeginTransactionAsync(IsolationLevel.ReadCommitted, ct).ConfigureAwait(false);
+        // L'apertura della connessione sta dentro il try.
+        //
+        // Stava fuori, e una connessione che non si apre e' esattamente cio'
+        // che accade quando la rete ha un singhiozzo alle due di notte:
+        // l'eccezione scavalcava i catch, risaliva fino all'orchestratore e
+        // chiudeva il run. Un guasto di trenta secondi buttava ore di lavoro.
+        // Qui diventa una slice da riprovare, che e' quello che e'.
+        SqlConnection? conn = null;
+        SqlTransaction? tx = null;
 
         try
         {
+            conn = await sql.OpenAsync(ct).ConfigureAwait(false);
+
+            // In caso di deadlock con l'applicazione la vittima designata e' il
+            // purge, mai l'operativita'.
+            await using (var pri = sql.Command(conn, null, "SET DEADLOCK_PRIORITY LOW;"))
+                await pri.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+            tx = (SqlTransaction)await conn
+                .BeginTransactionAsync(IsolationLevel.ReadCommitted, ct).ConfigureAwait(false);
+
             var totalRows = 0;
             var orderRows = 0;
 
@@ -124,7 +134,7 @@ public sealed class SliceExecutor(
 
             return SliceResult.Ok(totalRows);
         }
-        catch (SqlException ex) when (IsTransient(ex))
+        catch (SqlException ex) when (SqlErrors.IsTransient(ex))
         {
             await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
             log.LogWarning(ex, "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Sql={Number}",
@@ -142,6 +152,13 @@ public sealed class SliceExecutor(
             log.LogError(ex, "PurgeSliceAbandoned RunId={RunId} BatchNo={BatchNo}",
                 run.RunId, slice.BatchNo);
             return SliceResult.Fatal(ex.Message);
+        }
+        finally
+        {
+            // Con conn e tx dichiarate fuori dal try la liberazione non e' piu'
+            // affidata a un await using: va fatta qui, e in quest'ordine.
+            if (tx is not null) await tx.DisposeAsync().ConfigureAwait(false);
+            if (conn is not null) await conn.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -169,13 +186,10 @@ public sealed class SliceExecutor(
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    // 1205 deadlock, -2 timeout, 1222 lock request timeout: su un purge in
-    // concorrenza con l'OLTP sono esiti attesi, non eccezionali.
-    private static bool IsTransient(SqlException ex) =>
-        ex.Number is 1205 or -2 or 1222;
-
-    private async Task SafeRollbackAsync(SqlTransaction tx, CancellationToken ct)
+    private async Task SafeRollbackAsync(SqlTransaction? tx, CancellationToken ct)
     {
+        if (tx is null) return;   // il guasto e' avvenuto prima di aprirla
+
         try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
         catch (Exception ex) { log.LogError(ex, "Rollback fallito"); }
     }

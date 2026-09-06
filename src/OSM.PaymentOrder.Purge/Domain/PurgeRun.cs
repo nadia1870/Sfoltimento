@@ -4,7 +4,35 @@ namespace OSM.PaymentOrder.Purge.Domain;
 public enum RunPhase
 {
     Created, Selecting, Expanding, Validating, Planning, Executing,
-    Completed, Failed, Aborted
+    Completed, CompletedWithErrors, Failed, Aborted
+}
+
+/// <summary>
+/// Cosa significa che un run e' finito.
+///
+/// L'elenco delle fasi terminali era ripetuto in quattro punti — orchestratore,
+/// PhaseResult, ricerca dei run riprendibili, housekeeping — e ogni fase nuova
+/// richiedeva di trovarli tutti. Sta qui una volta sola.
+/// </summary>
+public static class RunPhases
+{
+    /// <summary>Fasi da cui un run non riparte. Nessun IPurgePhase le gestisce.</summary>
+    public static bool IsTerminal(RunPhase phase) =>
+        phase is RunPhase.Completed
+              or RunPhase.CompletedWithErrors
+              or RunPhase.Failed
+              or RunPhase.Aborted;
+
+    /// <summary>
+    /// Nomi delle fasi terminali per gli statement SQL. Derivati dall'enum, non
+    /// riscritti a mano: una fase aggiunta al tipo compare da sola nelle query.
+    /// </summary>
+    public static readonly IReadOnlyList<string> TerminalNames =
+        Enum.GetValues<RunPhase>().Where(IsTerminal).Select(p => p.ToString()).ToList();
+
+    /// <summary>Lista pronta per una clausola IN, gia' quotata.</summary>
+    public static string TerminalSqlList =>
+        string.Join(",", TerminalNames.Select(n => $"'{n}'"));
 }
 
 /// <summary>
@@ -62,6 +90,16 @@ public sealed class PurgeRun
 
     public required int MaxRowsPerBatch { get; init; }
     public required int MaxOrdersPerBatch { get; init; }
+
+    /// <summary>
+    /// Quante volte il run e' stato interrotto da un guasto e ripreso.
+    ///
+    /// Un guasto non chiude il run: la fase resta dov'e', perche' e' il
+    /// checkpoint da cui riprendere. Senza un contatore pero' un problema
+    /// stabile — un disco pieno, una rete rotta — farebbe ripartire lo stesso
+    /// run ogni notte all'infinito, sempre con lo stesso esito.
+    /// </summary>
+    public int InterruptionCount { get; set; }
 
     // La scelta fra RetentionCutoff e AbandonedCutoff appartiene alla strategia
     // (IPurgeStrategy.CutoffOf) e non al modello del run: era l'ultimo switch

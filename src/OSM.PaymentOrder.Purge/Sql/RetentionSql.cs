@@ -1,4 +1,5 @@
 using System.Text;
+using OSM.PaymentOrder.Purge.Domain;
 
 namespace OSM.PaymentOrder.Purge.Sql;
 
@@ -901,17 +902,23 @@ public static class RetentionSql
     /// Il filtro su StagingPurgedOn colpisce l'indice filtrato creato da
     /// 005_housekeeping.sql, che contiene solo i run non ancora trattati.
     /// </summary>
-    public const string SelectRunsToClean = """
+    public static readonly string SelectRunsToClean = $"""
         SELECT TOP (@MaxRuns) r.RunId, r.Strategy, r.Phase
         FROM Purge.PurgeRun AS r
         WHERE r.StagingPurgedOn IS NULL
-          AND r.Phase IN ('Completed', 'Failed', 'Aborted')
+          AND r.Phase IN ({RunPhases.TerminalSqlList})
           AND (
+                -- Finestra breve: concluso senza lasciare niente indietro.
                 (   r.Phase = 'Completed'
                 AND r.CompletedOn IS NOT NULL
                 AND r.CompletedOn < @CompletedCutoff
+                -- La condizione su RunBatchProgress vale per i run chiusi
+                -- prima che CompletedWithErrors esistesse: allora la
+                -- differenza si deduceva dalle slice, non dalla fase.
                 AND NOT EXISTS (SELECT 1 FROM Purge.RunBatchProgress AS b
                                 WHERE b.RunId = r.RunId AND b.Status = 'Abandoned'))
+             -- Finestra lunga: falliti, interrotti e conclusi con abbandoni.
+             -- Il loro staging e' l'unico appiglio per capire cosa e' successo.
              OR r.StartedOn < @FailedCutoff
               )
         ORDER BY r.StartedOn;

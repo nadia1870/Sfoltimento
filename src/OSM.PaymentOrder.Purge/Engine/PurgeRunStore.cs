@@ -47,9 +47,12 @@ public sealed class PurgeRunStore(SqlExecutor sql)
     /// </summary>
     public async Task<Guid?> FindResumableAsync(RetentionStrategy strategy, CancellationToken ct)
     {
-        const string q = """
+        // L'elenco delle fasi terminali viene dall'enum, non riscritto qui:
+        // una fase aggiunta al tipo e dimenticata in questa stringa renderebbe
+        // riprendibile un run gia' chiuso.
+        var q = $"""
             SELECT TOP (1) RunId FROM Purge.PurgeRun
-            WHERE Strategy = @Strategy AND Phase NOT IN ('Completed','Failed','Aborted')
+            WHERE Strategy = @Strategy AND Phase NOT IN ({RunPhases.TerminalSqlList})
             ORDER BY StartedOn;
             """;
         var id = await sql.ScalarAsync<Guid>(q, ct,
@@ -61,7 +64,8 @@ public sealed class PurgeRunStore(SqlExecutor sql)
     {
         const string q = """
             SELECT RunId, Strategy, Phase, DryRun, AnchorMode, RetentionCutoff,
-                   AbandonedCutoff, MaxRowsPerBatch, MaxOrdersPerBatch
+                   AbandonedCutoff, MaxRowsPerBatch, MaxOrdersPerBatch,
+                   InterruptionCount
             FROM Purge.PurgeRun WHERE RunId = @RunId;
             """;
 
@@ -75,7 +79,8 @@ public sealed class PurgeRunStore(SqlExecutor sql)
             RetentionCutoff = r.GetDateTime(5),
             AbandonedCutoff = r.IsDBNull(6) ? null : r.GetDateTime(6),
             MaxRowsPerBatch = r.GetInt32(7),
-            MaxOrdersPerBatch = r.GetInt32(8)
+            MaxOrdersPerBatch = r.GetInt32(8),
+            InterruptionCount = r.GetInt32(9)
         }, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
 
         return rows.Count == 0
@@ -89,7 +94,7 @@ public sealed class PurgeRunStore(SqlExecutor sql)
             UPDATE Purge.PurgeRun
                SET Phase = @Phase,
                    LastError = COALESCE(@Error, LastError),
-                   CompletedOn = CASE WHEN @Phase IN ('Completed','Failed')
+                   CompletedOn = CASE WHEN @Phase IN ('Completed','CompletedWithErrors','Failed')
                                       THEN SYSDATETIMEOFFSET() ELSE CompletedOn END
              WHERE RunId = @RunId;
             """;
@@ -112,6 +117,37 @@ public sealed class PurgeRunStore(SqlExecutor sql)
 
         return rows.Count == 0 ? null : rows[0];
     }
+
+    /// <summary>
+    /// Registra un'interruzione da guasto senza toccare la fase.
+    ///
+    /// La fase non cambia perche' e' il checkpoint da cui il run riprende. Il
+    /// contatore esiste solo per accorgersi di un guasto che non passa: oltre
+    /// la soglia l'orchestratore smette di riprovare.
+    /// </summary>
+    public Task RecordInterruptionAsync(Guid runId, string? error, CancellationToken ct)
+    {
+        const string u = """
+            UPDATE Purge.PurgeRun
+               SET InterruptionCount = InterruptionCount + 1,
+                   LastInterruptedOn = SYSDATETIMEOFFSET(),
+                   LastError = COALESCE(@Error, LastError)
+             WHERE RunId = @RunId;
+            """;
+        return sql.ExecuteAsync(u, ct,
+            SqlParam.Of("@RunId", runId), SqlParam.Of("@Error", error));
+    }
+
+    /// <summary>
+    /// Slice abbandonate del run, lette dal database e non da un contatore in
+    /// memoria: un run ripreso su piu' notti abbandona in una sessione e
+    /// completa in un'altra, e il contatore dell'ultima sessione direbbe zero.
+    /// </summary>
+    public async Task<int> CountAbandonedSlicesAsync(Guid runId, CancellationToken ct) =>
+        await sql.ScalarAsync<int>("""
+            SELECT COUNT(*) FROM Purge.RunBatchProgress
+            WHERE RunId = @RunId AND Status = 'Abandoned';
+            """, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
 
     public Task RecordAttemptAsync(Guid runId, int batchNo, string? reason, CancellationToken ct)
     {

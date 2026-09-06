@@ -31,6 +31,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\008_audit_trail.sql" Link="008_audit_trail.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="..\..\db\010_run_lifecycle.sql" Link="010_run_lifecycle.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
 
 <ItemGroup>

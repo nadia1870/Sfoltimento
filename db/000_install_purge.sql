@@ -34,7 +34,7 @@ BEGIN
     (
         RunId             UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_PurgeRun PRIMARY KEY,
         Strategy          VARCHAR(30)      NOT NULL,
-        Phase             VARCHAR(20)      NOT NULL,
+        Phase             VARCHAR(30)      NOT NULL,
         DryRun            BIT              NOT NULL,
         AnchorMode        VARCHAR(20)      NOT NULL,
         RetentionCutoff   DATETIME2        NOT NULL,
@@ -43,7 +43,10 @@ BEGIN
         MaxOrdersPerBatch INT              NOT NULL,
         StartedOn         DATETIMEOFFSET   NOT NULL,
         CompletedOn       DATETIMEOFFSET   NULL,
-        LastError         NVARCHAR(2000)   NULL
+        LastError         NVARCHAR(2000)   NULL,
+        InterruptionCount INT              NOT NULL
+                          CONSTRAINT DF_PurgeRun_Interruptions DEFAULT(0),
+        LastInterruptedOn DATETIMEOFFSET   NULL
     );
     CREATE NONCLUSTERED INDEX IX_PurgeRun_Phase ON Purge.PurgeRun (Phase, StartedOn);
 END
