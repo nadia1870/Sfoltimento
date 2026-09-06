@@ -93,13 +93,11 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
 
 
-        services.AddSingleton<CollectiveTailExecutor>();
         services.AddSingleton<IPurgePhase, SelectingPhase>();
         services.AddSingleton<IPurgePhase, ExpandingPhase>();
         services.AddSingleton<IPurgePhase, ValidatingPhase>();
         services.AddSingleton<IPurgePhase, PlanningPhase>();
         services.AddSingleton<IPurgePhase, ExecutingPhase>();
-        services.AddSingleton<IPurgePhase, CollectiveTailPhase>();
 
         services.AddSingleton<PurgeExecutionLock>();
         services.AddSingleton<RetentionOrchestrator>();

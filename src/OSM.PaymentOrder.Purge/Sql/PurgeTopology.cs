@@ -58,7 +58,7 @@ public static class PurgeTopology
     /// stessa slice degli ordini componenti; non costituiscono piu' una fase
     /// transazionale separata.
     /// </summary>
-    public static readonly IReadOnlyList<string> CollectiveTailTables =
+    public static readonly IReadOnlyList<string> CollectiveAggregateTables =
     [
         // Residui delle righe scartate in validazione (C3): non passano dallo
         // staging perche' non hanno OrderId, e bloccherebbero CollectiveOrderGroup.

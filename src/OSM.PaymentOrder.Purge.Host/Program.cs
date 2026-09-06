@@ -109,13 +109,11 @@ public static class Program
         builder.Services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();
         builder.Services.AddSingleton<IBatchExecutor, SliceBatchExecutor>();
         builder.Services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
-        builder.Services.AddSingleton<CollectiveTailExecutor>();
         builder.Services.AddSingleton<IPurgePhase, SelectingPhase>();
         builder.Services.AddSingleton<IPurgePhase, ExpandingPhase>();
         builder.Services.AddSingleton<IPurgePhase, ValidatingPhase>();
         builder.Services.AddSingleton<IPurgePhase, PlanningPhase>();
         builder.Services.AddSingleton<IPurgePhase, ExecutingPhase>();
-        builder.Services.AddSingleton<IPurgePhase, CollectiveTailPhase>();
         builder.Services.AddSingleton<PurgeExecutionLock>();
         builder.Services.AddSingleton<RetentionOrchestrator>();
 

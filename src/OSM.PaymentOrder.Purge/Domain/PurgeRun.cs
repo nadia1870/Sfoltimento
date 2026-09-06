@@ -3,7 +3,7 @@ namespace OSM.PaymentOrder.Purge.Domain;
 /// <summary>Fasi del run. Rif. v10 §7.2.</summary>
 public enum RunPhase
 {
-    Created, Selecting, Expanding, Validating, Planning, Executing, CollectiveTail,
+    Created, Selecting, Expanding, Validating, Planning, Executing,
     Completed, Failed, Aborted
 }
 

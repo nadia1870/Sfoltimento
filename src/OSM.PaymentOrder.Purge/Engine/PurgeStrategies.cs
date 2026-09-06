@@ -17,9 +17,6 @@ public interface IPurgeStrategy
     /// <summary>Indica quale algoritmo di planning deve usare BatchPlanner.</summary>
     PurgePlanningMode PlanningMode { get; }
 
-    /// <summary>La strategy richiede il cleanup finale del collective.</summary>
-    bool RequiresCollectiveTail { get; }
-
     /// <summary>Determina se il candidato puo' essere legato a un collective.</summary>
     bool SkipCollectiveLinkValidation { get; }
 
@@ -52,7 +49,6 @@ public abstract class PurgeStrategyBase(
 {
     public abstract RetentionStrategy Type { get; }
     public virtual PurgePlanningMode PlanningMode => PurgePlanningMode.Standard;
-    public virtual bool RequiresCollectiveTail => false;
     public virtual bool SkipCollectiveLinkValidation => false;
     public virtual bool UsesAbandonedDeletes => false;
 
@@ -147,8 +143,8 @@ public sealed class CollectiveStrategy(SqlExecutor sql, ILogger<CollectiveStrate
     private readonly SqlExecutor _sql = sql;
     public override RetentionStrategy Type => RetentionStrategy.Collective;
     // Il Collective viene eliminato nella stessa transazione dei suoi ordini componenti.
-    // Non esiste piu' una delete differita in CollectiveTail.
-    public override bool RequiresCollectiveTail => false;
+    // La coda dell'aggregato collettivo e' inclusa negli statement della slice:
+    // non esiste una cancellazione differita in una fase successiva.
     public override bool SkipCollectiveLinkValidation => true;
 
     public override IEnumerable<(string Table, string Sql)> GetSliceStatements() =>

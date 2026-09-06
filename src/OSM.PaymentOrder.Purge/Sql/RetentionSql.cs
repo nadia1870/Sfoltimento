@@ -574,7 +574,7 @@ public static class RetentionSql
         WHERE c.RunId = @RunId;
         """;
 
-    public static string CountCollectiveTail(string table) => table switch
+    public static string CountCollectiveAggregate(string table) => table switch
     {
         "CollectiveOrderGroupOrderHistoryResidue" => $"""
             SELECT COUNT_BIG(*)

@@ -4,8 +4,7 @@ using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 namespace OSM.PaymentOrder.Purge.Engine.Phases;
 
 public sealed class ExecutingPhase(
-    IBatchExecutionCoordinator coordinator,
-    PurgeStrategyResolver strategyResolver) : IPurgePhase
+    IBatchExecutionCoordinator coordinator) : IPurgePhase
 {
     private static readonly IReadOnlySet<RunPhase> Supported =
         new HashSet<RunPhase> { RunPhase.Executing };
@@ -17,13 +16,10 @@ public sealed class ExecutingPhase(
     {
         var result = await coordinator.ExecuteAsync(run, ct).ConfigureAwait(false);
 
-        if (!result.Completed)
-            return PhaseResult.Stay();
-
-        var strategy = strategyResolver.Resolve(run.Strategy);
-
-        return strategy.RequiresCollectiveTail
-            ? PhaseResult.Next(RunPhase.CollectiveTail)
-            : PhaseResult.Complete();
+        // Completed = false significa finestra chiusa o lavoro sospeso: la fase
+        // resta la stessa e il run riprendera' dal checkpoint.
+        return result.Completed
+            ? PhaseResult.Complete()
+            : PhaseResult.Stay();
     }
 }

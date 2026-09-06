@@ -39,10 +39,10 @@ public sealed class DryRunReporter(SqlExecutor sql, ILogger<DryRunReporter> log)
 
         if (run.Strategy == RetentionStrategy.Collective)
         {
-            foreach (var table in PurgeTopology.CollectiveTailTables)
+            foreach (var table in PurgeTopology.CollectiveAggregateTables)
             {
                 ct.ThrowIfCancellationRequested();
-                report.Add(table, await sql.ScalarAsync<long>(RetentionSql.CountCollectiveTail(table), ct, p)
+                report.Add(table, await sql.ScalarAsync<long>(RetentionSql.CountCollectiveAggregate(table), ct, p)
                                            .ConfigureAwait(false));
             }
         }

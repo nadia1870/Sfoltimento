@@ -116,8 +116,8 @@ public sealed class BatchExecutionCoordinator(
                 ct).ConfigureAwait(false);
         }
 
-        // Non "PurgeRunCompleted": il run puo' ancora dover attraversare
-        // CollectiveTail, ed e' l'orchestratore a stabilire quando e' concluso.
+        // Non "PurgeRunCompleted":  Il coordinator non decide la fase del run:
+        // e' l'orchestratore a stabilire quando e' concluso.
         // Un evento con quel nome emesso qui anticiperebbe un fatto non avvenuto
         // e produrrebbe due righe per lo stesso run nelle query sui log.
         log.LogInformation(

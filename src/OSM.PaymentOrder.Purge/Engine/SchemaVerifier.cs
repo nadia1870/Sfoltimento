@@ -38,7 +38,7 @@ public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
 
         // I due nomi "Residue" della coda collettiva sono etichette di statement,
         // non tabelle: la tabella reale e' quella senza il suffisso.
-        foreach (var t in PurgeTopology.CollectiveTailTables)
+        foreach (var t in PurgeTopology.CollectiveAggregateTables)
             yield return $"PaymentOrder.{t.Replace("Residue", string.Empty)}";
 
         foreach (var t in new[]
