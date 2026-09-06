@@ -1,0 +1,423 @@
+diff --git a/src/OSM.PaymentOrder.Purge.Host/Program.cs b/src/OSM.PaymentOrder.Purge.Host/Program.cs
+index 137ea87..d3e0b3d 100644
+--- a/src/OSM.PaymentOrder.Purge.Host/Program.cs
++++ b/src/OSM.PaymentOrder.Purge.Host/Program.cs
+@@ -109,13 +109,11 @@ public static class Program
+         builder.Services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();
+         builder.Services.AddSingleton<IBatchExecutor, SliceBatchExecutor>();
+         builder.Services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
+-        builder.Services.AddSingleton<CollectiveTailExecutor>();
+         builder.Services.AddSingleton<IPurgePhase, SelectingPhase>();
+         builder.Services.AddSingleton<IPurgePhase, ExpandingPhase>();
+         builder.Services.AddSingleton<IPurgePhase, ValidatingPhase>();
+         builder.Services.AddSingleton<IPurgePhase, PlanningPhase>();
+         builder.Services.AddSingleton<IPurgePhase, ExecutingPhase>();
+-        builder.Services.AddSingleton<IPurgePhase, CollectiveTailPhase>();
+         builder.Services.AddSingleton<PurgeExecutionLock>();
+         builder.Services.AddSingleton<RetentionOrchestrator>();
+ 
+diff --git a/src/OSM.PaymentOrder.Purge/Domain/PurgeRun.cs b/src/OSM.PaymentOrder.Purge/Domain/PurgeRun.cs
+index 1cfbc70..0d1ef7c 100644
+--- a/src/OSM.PaymentOrder.Purge/Domain/PurgeRun.cs
++++ b/src/OSM.PaymentOrder.Purge/Domain/PurgeRun.cs
+@@ -3,7 +3,7 @@ namespace OSM.PaymentOrder.Purge.Domain;
+ /// <summary>Fasi del run. Rif. v10 §7.2.</summary>
+ public enum RunPhase
+ {
+-    Created, Selecting, Expanding, Validating, Planning, Executing, CollectiveTail,
++    Created, Selecting, Expanding, Validating, Planning, Executing,
+     Completed, Failed, Aborted
+ }
+ 
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+index 919849a..48da2a9 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+@@ -82,10 +82,17 @@ public sealed class BatchExecutionCoordinator(
+                         result.Reason,
+                         ct).ConfigureAwait(false);
+ 
++                    // Il TimeProvider e' gia' iniettato per la finestra: usarlo
++                    // anche qui rende le attese controllabili nei test e evita
++                    // che il coordinatore dipenda dall'orologio di sistema.
+                     await Task.Delay(
+                         _options.RetryDelay,
++                        clock,
+                         ct).ConfigureAwait(false);
+-                    break;
++
++                    // Il ritardo di retry sostituisce il pacing fra slice:
++                    // sommarli farebbe attendere RetryDelay + InterSliceDelay.
++                    continue;
+ 
+                 default:
+                     // Un singolo aggregato problematico non deve bloccare
+@@ -105,11 +112,16 @@ public sealed class BatchExecutionCoordinator(
+ 
+             await Task.Delay(
+                 _options.InterSliceDelay,
++                clock,
+                 ct).ConfigureAwait(false);
+         }
+ 
++        // Non "PurgeRunCompleted": qui finisce il ciclo delle slice, ma e'
++        // l'orchestratore a stabilire quando il run e' concluso. Un evento con
++        // quel nome emesso da piu' punti produrrebbe righe duplicate per lo
++        // stesso run nelle query sui log.
+         log.LogInformation(
+-            "PurgeRunCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
++            "PurgeBatchExecutionCompleted RunId={RunId} Righe={Rows} SliceCompletate={Completed} " +
+             "SliceAbbandonate={Abandoned}",
+             run.RunId,
+             totalRows,
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/CollectiveTailExecutor.cs b/src/OSM.PaymentOrder.Purge/Engine/CollectiveTailExecutor.cs
+deleted file mode 100644
+index ed9b51d..0000000
+--- a/src/OSM.PaymentOrder.Purge/Engine/CollectiveTailExecutor.cs
++++ /dev/null
+@@ -1,43 +0,0 @@
+-using Microsoft.Extensions.Logging;
+-using OSM.PaymentOrder.Purge.Data;
+-using OSM.PaymentOrder.Purge.Domain;
+-using OSM.PaymentOrder.Purge.Sql;
+-
+-namespace OSM.PaymentOrder.Purge.Engine;
+-
+-/// <summary>
+-/// Componente mantenuto solo per compatibilita' con run V5 precedenti.
+-///
+-/// I nuovi run NON devono mai arrivare qui: un Collective viene cancellato
+-/// nella stessa transazione dei suoi Order componenti dal SliceExecutor.
+-/// Eseguire una delete differita qui violerebbe l'invariante di atomicita'.
+-/// </summary>
+-public sealed class CollectiveTailExecutor(
+-    SqlExecutor sql,
+-    ILogger<CollectiveTailExecutor> log)
+-{
+-    public async Task<bool> ExecuteAsync(PurgeRun run, CancellationToken ct)
+-    {
+-        if (run.Strategy != RetentionStrategy.Collective)
+-            return true;
+-
+-        var selected = await sql.ScalarAsync<long>("""
+-            SELECT COUNT_BIG(*)
+-            FROM Purge.RunCandidateCollective
+-            WHERE RunId = @RunId AND State = 'Selected';
+-            """, ct, SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
+-
+-        if (selected > 0)
+-        {
+-            log.LogError(
+-                "CollectiveTail legacy non eseguibile in V5.1: RunId={RunId} " +
+-                "ha {Count} Collective ancora Selected. L'esecuzione atomica deve avvenire " +
+-                "all'interno della slice.", run.RunId, selected);
+-            throw new InvalidOperationException(
+-                $"Run {run.RunId}: CollectiveTail legacy non supportato; " +
+-                "il Collective deve essere cancellato nella stessa transazione degli ordini.");
+-        }
+-
+-        return true;
+-    }
+-}
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs b/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
+index 93a5ab0..df07ddb 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
+@@ -39,10 +39,10 @@ public sealed class DryRunReporter(SqlExecutor sql, ILogger<DryRunReporter> log)
+ 
+         if (run.Strategy == RetentionStrategy.Collective)
+         {
+-            foreach (var table in PurgeTopology.CollectiveTailTables)
++            foreach (var table in PurgeTopology.CollectiveAggregateTables)
+             {
+                 ct.ThrowIfCancellationRequested();
+-                report.Add(table, await sql.ScalarAsync<long>(RetentionSql.CountCollectiveTail(table), ct, p)
++                report.Add(table, await sql.ScalarAsync<long>(RetentionSql.CountCollectiveAggregate(table), ct, p)
+                                            .ConfigureAwait(false));
+             }
+         }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/CollectiveTailPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/CollectiveTailPhase.cs
+deleted file mode 100644
+index 3458214..0000000
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/CollectiveTailPhase.cs
++++ /dev/null
+@@ -1,21 +0,0 @@
+-using OSM.PaymentOrder.Purge.Domain;
+-
+-namespace OSM.PaymentOrder.Purge.Engine.Phases;
+-
+-/// <summary>Legacy recovery phase: i nuovi run non la raggiungono piu'.</summary>
+-public sealed class CollectiveTailPhase(CollectiveTailExecutor executor) : IPurgePhase
+-{
+-    private static readonly IReadOnlySet<RunPhase> Supported =
+-        new HashSet<RunPhase> { RunPhase.CollectiveTail };
+-
+-    public RunPhase Phase => RunPhase.CollectiveTail;
+-    public IReadOnlySet<RunPhase> HandledPhases => Supported;
+-
+-    public async Task<PhaseResult> ExecuteAsync(PurgeRun run, CancellationToken ct)
+-    {
+-        var completed = await executor.ExecuteAsync(run, ct).ConfigureAwait(false);
+-        return completed
+-            ? PhaseResult.Complete()
+-            : PhaseResult.Stay();
+-    }
+-}
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
+index ae2aeb5..3934693 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
+@@ -4,8 +4,7 @@ using OSM.PaymentOrder.Purge.Engine.BatchExecution;
+ namespace OSM.PaymentOrder.Purge.Engine.Phases;
+ 
+ public sealed class ExecutingPhase(
+-    IBatchExecutionCoordinator coordinator,
+-    PurgeStrategyResolver strategyResolver) : IPurgePhase
++    IBatchExecutionCoordinator coordinator) : IPurgePhase
+ {
+     private static readonly IReadOnlySet<RunPhase> Supported =
+         new HashSet<RunPhase> { RunPhase.Executing };
+@@ -17,13 +16,10 @@ public sealed class ExecutingPhase(
+     {
+         var result = await coordinator.ExecuteAsync(run, ct).ConfigureAwait(false);
+ 
+-        if (!result.Completed)
+-            return PhaseResult.Stay();
+-
+-        var strategy = strategyResolver.Resolve(run.Strategy);
+-
+-        return strategy.RequiresCollectiveTail
+-            ? PhaseResult.Next(RunPhase.CollectiveTail)
+-            : PhaseResult.Complete();
++        // Completed = false significa finestra chiusa o lavoro sospeso: la fase
++        // resta la stessa e il run riprendera' dal checkpoint.
++        return result.Completed
++            ? PhaseResult.Complete()
++            : PhaseResult.Stay();
+     }
+ }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
+index c997bc5..f77a41a 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/PlanningPhase.cs
+@@ -39,7 +39,7 @@ public sealed class PlanningPhase(
+         }
+ 
+         log.LogInformation(
+-            "PurgeRunCompleted RunId={RunId} Modalita=DryRun{NewLine}{Report}",
++            "PurgeDryRunReport RunId={RunId}{NewLine}{Report}",
+             run.RunId, Environment.NewLine, report.ToText());
+ 
+         return PhaseResult.Complete();
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
+index 12a97c4..64f2c3c 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/SelectingPhase.cs
+@@ -27,7 +27,7 @@ public sealed class SelectingPhase(
+                 await dryRunReporter.ProduceAsync(run, ct).ConfigureAwait(false);
+ 
+             log.LogInformation(
+-                "PurgeRunCompleted RunId={RunId} Strategy={Strategy} Candidati=0 " +
++                "PurgeSelectionEmpty RunId={RunId} Strategy={Strategy} Candidati=0 " +
+                 "Cutoff={Cutoff:yyyy-MM-dd} — nessun ordine eleggibile.",
+                 run.RunId, run.Strategy, strategy.CutoffOf(run));
+ 
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs b/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
+index 485f922..6eb3ebb 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
+@@ -17,9 +17,6 @@ public interface IPurgeStrategy
+     /// <summary>Indica quale algoritmo di planning deve usare BatchPlanner.</summary>
+     PurgePlanningMode PlanningMode { get; }
+ 
+-    /// <summary>La strategy richiede il cleanup finale del collective.</summary>
+-    bool RequiresCollectiveTail { get; }
+-
+     /// <summary>Determina se il candidato puo' essere legato a un collective.</summary>
+     bool SkipCollectiveLinkValidation { get; }
+ 
+@@ -52,7 +49,6 @@ public abstract class PurgeStrategyBase(
+ {
+     public abstract RetentionStrategy Type { get; }
+     public virtual PurgePlanningMode PlanningMode => PurgePlanningMode.Standard;
+-    public virtual bool RequiresCollectiveTail => false;
+     public virtual bool SkipCollectiveLinkValidation => false;
+     public virtual bool UsesAbandonedDeletes => false;
+ 
+@@ -147,8 +143,8 @@ public sealed class CollectiveStrategy(SqlExecutor sql, ILogger<CollectiveStrate
+     private readonly SqlExecutor _sql = sql;
+     public override RetentionStrategy Type => RetentionStrategy.Collective;
+     // Il Collective viene eliminato nella stessa transazione dei suoi ordini componenti.
+-    // Non esiste piu' una delete differita in CollectiveTail.
+-    public override bool RequiresCollectiveTail => false;
++    // La coda dell'aggregato collettivo e' inclusa negli statement della slice:
++    // non esiste una cancellazione differita in una fase successiva.
+     public override bool SkipCollectiveLinkValidation => true;
+ 
+     public override IEnumerable<(string Table, string Sql)> GetSliceStatements() =>
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs b/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
+index 2bea89f..32c9205 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/RetentionOrchestrator.cs
+@@ -48,7 +48,16 @@ public sealed class RetentionOrchestrator(
+                     await TransitionAsync(run, nextPhase, result.Error, ct).ConfigureAwait(false);
+ 
+                 if (result.Stop)
++                {
++                    // Unico punto in cui si dichiara concluso un run: le fasi
++                    // sanno cosa hanno fatto, non se il run e' finito.
++                    if (run.Phase == RunPhase.Completed)
++                        log.LogInformation(
++                            "PurgeRunCompleted RunId={RunId} Strategy={Strategy} DryRun={DryRun}",
++                            runId, run.Strategy, run.DryRun);
++
+                     return;
++                }
+ 
+                 // Stay non dovrebbe mai essere usato con Stop=false, ma il
+                 // contratto lo rende esplicito per evitare loop accidentali.
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs b/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
+index 60b05a5..2620da5 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
+@@ -38,7 +38,7 @@ public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
+ 
+         // I due nomi "Residue" della coda collettiva sono etichette di statement,
+         // non tabelle: la tabella reale e' quella senza il suffisso.
+-        foreach (var t in PurgeTopology.CollectiveTailTables)
++        foreach (var t in PurgeTopology.CollectiveAggregateTables)
+             yield return $"PaymentOrder.{t.Replace("Residue", string.Empty)}";
+ 
+         foreach (var t in new[]
+diff --git a/src/OSM.PaymentOrder.Purge/Sql/PurgeTopology.cs b/src/OSM.PaymentOrder.Purge/Sql/PurgeTopology.cs
+index 662036d..b22ed60 100644
+--- a/src/OSM.PaymentOrder.Purge/Sql/PurgeTopology.cs
++++ b/src/OSM.PaymentOrder.Purge/Sql/PurgeTopology.cs
+@@ -58,7 +58,7 @@ public static class PurgeTopology
+     /// stessa slice degli ordini componenti; non costituiscono piu' una fase
+     /// transazionale separata.
+     /// </summary>
+-    public static readonly IReadOnlyList<string> CollectiveTailTables =
++    public static readonly IReadOnlyList<string> CollectiveAggregateTables =
+     [
+         // Residui delle righe scartate in validazione (C3): non passano dallo
+         // staging perche' non hanno OrderId, e bloccherebbero CollectiveOrderGroup.
+diff --git a/src/OSM.PaymentOrder.Purge/Sql/RetentionSql.cs b/src/OSM.PaymentOrder.Purge/Sql/RetentionSql.cs
+index 05b47c7..affa2b6 100644
+--- a/src/OSM.PaymentOrder.Purge/Sql/RetentionSql.cs
++++ b/src/OSM.PaymentOrder.Purge/Sql/RetentionSql.cs
+@@ -574,7 +574,7 @@ public static class RetentionSql
+         WHERE c.RunId = @RunId;
+         """;
+ 
+-    public static string CountCollectiveTail(string table) => table switch
++    public static string CountCollectiveAggregate(string table) => table switch
+     {
+         "CollectiveOrderGroupOrderHistoryResidue" => $"""
+             SELECT COUNT_BIG(*)
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/ExecutingPhaseTests.cs b/tests/OSM.PaymentOrder.Purge.Tests/ExecutingPhaseTests.cs
+index bbd7108..7163cfe 100644
+--- a/tests/OSM.PaymentOrder.Purge.Tests/ExecutingPhaseTests.cs
++++ b/tests/OSM.PaymentOrder.Purge.Tests/ExecutingPhaseTests.cs
+@@ -9,10 +9,10 @@ namespace OSM.PaymentOrder.Purge.Tests;
+ public sealed class ExecutingPhaseTests
+ {
+     [Fact]
+-    public async Task Completed_without_collective_tail_completes_phase()
++    public async Task Completed_execution_completes_phase()
+     {
+         var coordinator = new StubCoordinator(new BatchExecutionResult(true, 1, 0, 10));
+-        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
++        var phase = new ExecutingPhase(coordinator);
+ 
+         var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
+ 
+@@ -20,23 +20,12 @@ public sealed class ExecutingPhaseTests
+         Assert.Equal(RunPhase.Completed, result.NextPhase);
+     }
+ 
+-    [Fact]
+-    public async Task Completed_with_collective_tail_moves_to_collective_tail()
+-    {
+-        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 1, 0, 10));
+-        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Collective, true));
+-
+-        var result = await phase.ExecuteAsync(CreateRun(RetentionStrategy.Collective), CancellationToken.None);
+-
+-        Assert.False(result.Stop);
+-        Assert.Equal(RunPhase.CollectiveTail, result.NextPhase);
+-    }
+ 
+     [Fact]
+     public async Task Incomplete_execution_stays_in_phase()
+     {
+         var coordinator = new StubCoordinator(new BatchExecutionResult(false, 1, 0, 10));
+-        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
++        var phase = new ExecutingPhase(coordinator);
+ 
+         var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
+ 
+@@ -48,7 +37,7 @@ public sealed class ExecutingPhaseTests
+     public async Task Coordinator_receives_same_run()
+     {
+         var coordinator = new StubCoordinator(new BatchExecutionResult(true, 0, 0, 0));
+-        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
++        var phase = new ExecutingPhase(coordinator);
+         var run = CreateRun();
+ 
+         await phase.ExecuteAsync(run, CancellationToken.None);
+@@ -61,7 +50,7 @@ public sealed class ExecutingPhaseTests
+     {
+         using var cts = new CancellationTokenSource();
+         var coordinator = new StubCoordinator(new BatchExecutionResult(true, 0, 0, 0));
+-        var phase = new ExecutingPhase(coordinator, CreateResolver(RetentionStrategy.Terminated, false));
++        var phase = new ExecutingPhase(coordinator);
+ 
+         await phase.ExecuteAsync(CreateRun(), cts.Token);
+ 
+@@ -81,8 +70,6 @@ public sealed class ExecutingPhaseTests
+         MaxOrdersPerBatch = 10
+     };
+ 
+-    private static PurgeStrategyResolver CreateResolver(RetentionStrategy strategy, bool requiresCollectiveTail) =>
+-        new(new[] { new FakeStrategy(strategy, requiresCollectiveTail) });
+ 
+     private sealed class StubCoordinator(BatchExecutionResult result) : IBatchExecutionCoordinator
+     {
+@@ -97,16 +84,4 @@ public sealed class ExecutingPhaseTests
+         }
+     }
+ 
+-    private sealed class FakeStrategy(RetentionStrategy type, bool requiresCollectiveTail) : IPurgeStrategy
+-    {
+-        public RetentionStrategy Type => type;
+-        public PurgePlanningMode PlanningMode => PurgePlanningMode.Standard;
+-        public bool RequiresCollectiveTail => requiresCollectiveTail;
+-        public bool SkipCollectiveLinkValidation => false;
+-        public bool UsesAbandonedDeletes => false;
+-        public DateTime CutoffOf(PurgeRun run) => run.RetentionCutoff;
+-        public Task<int> SelectAsync(PurgeRun run, CancellationToken ct) => Task.FromResult(0);
+-        public Task ExpandAsync(PurgeRun run, CancellationToken ct) => Task.CompletedTask;
+-        public IEnumerable<(string Table, string Sql)> GetSliceStatements() => Array.Empty<(string, string)>();
+-    }
+ }
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+index 7f2b698..c979f81 100644
+--- a/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
++++ b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+@@ -91,15 +91,11 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
+         services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();
+         services.AddSingleton<IBatchExecutor, SliceBatchExecutor>();
+         services.AddSingleton<IBatchExecutionCoordinator, BatchExecutionCoordinator>();
+-
+-
+-        services.AddSingleton<CollectiveTailExecutor>();
+         services.AddSingleton<IPurgePhase, SelectingPhase>();
+         services.AddSingleton<IPurgePhase, ExpandingPhase>();
+         services.AddSingleton<IPurgePhase, ValidatingPhase>();
+         services.AddSingleton<IPurgePhase, PlanningPhase>();
+         services.AddSingleton<IPurgePhase, ExecutingPhase>();
+-        services.AddSingleton<IPurgePhase, CollectiveTailPhase>();
+ 
+         services.AddSingleton<PurgeExecutionLock>();
+         services.AddSingleton<RetentionOrchestrator>();
