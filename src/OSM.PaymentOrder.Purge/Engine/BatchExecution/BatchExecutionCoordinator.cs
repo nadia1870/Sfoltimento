@@ -34,6 +34,8 @@ public sealed class BatchExecutionCoordinator(
         var abandoned = 0;
         long totalRows = 0;
 
+        SliceInfo? slice = null;
+
         while (true)
         {
             // A cancellation is a control-flow signal, not a successful run completion.
@@ -54,12 +56,18 @@ public sealed class BatchExecutionCoordinator(
                     totalRows);
             }
 
-            var slice = await workProvider.GetNextAsync(
-                run.RunId,
-                ct).ConfigureAwait(false);
-
+            // La prima fetch, e ogni fetch successiva dopo un retry, avvengono
+            // solo dopo il controllo della finestra. In questo modo una finestra
+            // già chiusa non consuma lavoro dal provider.
             if (slice is null)
-                break;
+            {
+                slice = await workProvider.GetNextAsync(
+                    run.RunId,
+                    ct).ConfigureAwait(false);
+
+                if (slice is null)
+                    break;
+            }
 
             var result = await executor.ExecuteAsync(
                 run,
@@ -92,6 +100,9 @@ public sealed class BatchExecutionCoordinator(
 
                     // Il ritardo di retry sostituisce il pacing fra slice:
                     // sommarli farebbe attendere RetryDelay + InterSliceDelay.
+                    // Il retry torna all'inizio del ciclo: prima di una nuova
+                    // fetch viene quindi ricontrollata la finestra operativa.
+                    slice = null;
                     continue;
 
                 default:
@@ -110,10 +121,36 @@ public sealed class BatchExecutionCoordinator(
                     break;
             }
 
+            // Recuperiamo la prossima slice prima del pacing: in questo modo
+            // l'ultima slice non paga un InterSliceDelay inutile. Il provider
+            // legge soltanto il checkpoint e non riserva la slice, quindi il
+            // look-ahead non altera la semantica del contratto.
+            if (!_options.IsWithinWindow(clock.GetLocalNow()))
+            {
+                log.LogInformation(
+                    "Fine finestra operativa dopo la slice: RunId={RunId} sospeso, slice completate={Completed}",
+                    run.RunId,
+                    completed);
+
+                return BatchExecutionResult.WindowClosed(
+                    completed,
+                    abandoned,
+                    totalRows);
+            }
+
+            var nextSlice = await workProvider.GetNextAsync(
+                run.RunId,
+                ct).ConfigureAwait(false);
+
+            if (nextSlice is null)
+                break;
+
             await Task.Delay(
                 _options.InterSliceDelay,
                 clock,
                 ct).ConfigureAwait(false);
+
+            slice = nextSlice;
         }
 
         // Non "PurgeRunCompleted":  Il coordinator non decide la fase del run:
