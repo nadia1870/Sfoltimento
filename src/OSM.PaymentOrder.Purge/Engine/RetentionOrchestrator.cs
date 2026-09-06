@@ -62,6 +62,17 @@ public sealed class RetentionOrchestrator(
             while (true)
             {
                 var phase = ResolvePhase(run.Phase);
+
+                // A phase may handle more than one persisted state for backward
+                // compatibility (currently Selecting also handles Created).
+                // The persisted state must nevertheless become the phase
+                // checkpoint before any work is executed. Otherwise an exception
+                // in Selecting leaves the run in Created, so the next execution
+                // cannot distinguish "not started" from "interrupted while
+                // selecting" and the lifecycle checkpoint is wrong.
+                if (run.Phase != phase.Phase)
+                    await TransitionAsync(run, phase.Phase, null, ct).ConfigureAwait(false);
+
                 var result = await phase.ExecuteAsync(run, ct).ConfigureAwait(false);
 
                 if (result.NextPhase is { } nextPhase)
@@ -168,12 +179,12 @@ public sealed class RetentionOrchestrator(
 
         foreach (var phase in phases)
         {
-            foreach (var handled in phase.HandledPhases)
+            foreach (var handledPhase in phase.HandledPhases)
             {
-                if (!map.TryAdd(handled, phase))
+                if (!map.TryAdd(handledPhase, phase))
                 {
                     throw new InvalidOperationException(
-                        $"Più IPurgePhase gestiscono la RunPhase '{handled}'.");
+                        $"La RunPhase '{handledPhase}' è gestita da più IPurgePhase.");
                 }
             }
         }

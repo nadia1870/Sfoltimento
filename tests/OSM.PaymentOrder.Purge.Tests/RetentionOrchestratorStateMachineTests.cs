@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Engine;
@@ -142,6 +143,7 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
             db.Store,
             new IPurgePhase[] { transitionPhase, cancellationPhase },
             db.Services.GetRequiredService<PurgeStrategyResolver>(),
+            Options.Create(new PurgeOptions()), 
             NullLogger<RetentionOrchestrator>.Instance);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(

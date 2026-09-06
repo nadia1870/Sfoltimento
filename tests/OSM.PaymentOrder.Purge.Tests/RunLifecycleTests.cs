@@ -29,7 +29,9 @@ public sealed class RunLifecycleTests(PurgeDatabaseFixture db) : IAsyncLifetime
     private sealed class FaseCheEsplode(RunPhase fase, Func<Exception> guasto) : IPurgePhase
     {
         public RunPhase Phase => fase;
-        public IReadOnlySet<RunPhase> HandledPhases { get; } = new HashSet<RunPhase> { fase };
+        public IReadOnlySet<RunPhase> HandledPhases { get; } = fase == RunPhase.Selecting?
+            new HashSet<RunPhase> { RunPhase.Created, RunPhase.Selecting }:
+            new HashSet<RunPhase> { fase };
 
         public Task<PhaseResult> ExecuteAsync(PurgeRun run, CancellationToken ct) =>
             throw guasto();
