@@ -41,6 +41,11 @@ public sealed class SliceExecutor(
             var totalRows = 0;
             var orderRows = 0;
 
+            // Traccia per tabella. Raccolta in memoria e scritta in un solo
+            // statement prima del commit: e' l'unico modo di registrarla senza
+            // allungare la transazione di un round-trip per tabella.
+            var auditLines = new List<(string Table, int Rows)>();
+
             if (strategy.Type == RetentionStrategy.Collective)
             {
                 await using var guard = sql.Command(conn, tx, RetentionSql.ValidateCollectiveBatchIntegrity,
@@ -74,6 +79,11 @@ public sealed class SliceExecutor(
                 totalRows += affected;
                 if (table == "Order") orderRows = affected;
 
+                // Le tabelle a zero righe non entrano nell'audit: sono la
+                // maggioranza in ogni slice (un ordine ha un solo tipo di
+                // dettaglio) e scriverle renderebbe la traccia illeggibile.
+                if (affected > 0) auditLines.Add((table, affected));
+
                 metrics.RowsDeleted(table, run.Strategy.ToString(), affected);
             }
 
@@ -90,6 +100,10 @@ public sealed class SliceExecutor(
                     run.RunId, slice.BatchNo, slice.OrderCount, orderRows);
                 return SliceResult.Retryable("StatusChangedDuringExecution");
             }
+
+            if (auditLines.Count > 0)
+                await WriteAuditAsync(conn, tx, run.RunId, slice.BatchNo, auditLines, ct)
+                    .ConfigureAwait(false);
 
             await using (var chk = sql.Command(conn, tx, RetentionSql.CheckpointSlice,
                             SqlParam.Of("@RunId", run.RunId),
@@ -129,6 +143,30 @@ public sealed class SliceExecutor(
                 run.RunId, slice.BatchNo);
             return SliceResult.Fatal(ex.Message);
         }
+    }
+
+    private async Task WriteAuditAsync(
+        SqlConnection conn,
+        SqlTransaction tx,
+        Guid runId,
+        int batchNo,
+        IReadOnlyList<(string Table, int Rows)> lines,
+        CancellationToken ct)
+    {
+        var parameters = new SqlParam[2 + lines.Count * 2];
+        parameters[0] = SqlParam.Of("@RunId", runId);
+        parameters[1] = SqlParam.Of("@BatchNo", batchNo);
+
+        for (var i = 0; i < lines.Count; i++)
+        {
+            parameters[2 + i * 2] = SqlParam.Of($"@T{i}", lines[i].Table);
+            parameters[3 + i * 2] = SqlParam.Of($"@R{i}", (long)lines[i].Rows);
+        }
+
+        await using var cmd = sql.Command(
+            conn, tx, RetentionSql.InsertSliceAudit(lines.Count), parameters);
+
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     // 1205 deadlock, -2 timeout, 1222 lock request timeout: su un purge in

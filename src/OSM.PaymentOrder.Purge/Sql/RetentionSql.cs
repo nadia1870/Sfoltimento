@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace OSM.PaymentOrder.Purge.Sql;
 
 /// <summary>
@@ -533,6 +535,42 @@ public static class RetentionSql
                       AND legacy.CollectiveOrderId IS NULL
                 ) THEN 1 ELSE 0 END;
         """;
+
+    /// <summary>
+    /// Traccia per tabella di cio' che la slice ha cancellato davvero.
+    ///
+    /// Scritta nella stessa transazione delle DELETE e del checkpoint. Se la
+    /// slice va in rollback la traccia sparisce con essa, quindi non puo'
+    /// esistere una riga di audit che dichiara righe ancora presenti a
+    /// database — che e' l'unico modo in cui un audit puo' fare danno.
+    ///
+    /// Append-only, una riga per (RunId, BatchNo, tabella): nessun UPDATE, e
+    /// quindi nessun punto di contesa se un giorno le slice verranno eseguite
+    /// in parallelo. L'aggregazione per run la fa Purge.vDryRunVsActual.
+    ///
+    /// Un solo statement multi-riga anziche' uno per tabella: la transazione
+    /// tiene lock sulle tabelle di dominio, e allungarla di venticinque
+    /// round-trip per scrivere l'audit vanificherebbe il lavoro fatto sul
+    /// dimensionamento delle slice.
+    /// </summary>
+    public static string InsertSliceAudit(int lineCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(lineCount);
+
+        var sb = new StringBuilder(
+            "INSERT INTO Purge.PurgeAudit (RunId, BatchNo, TableName, RowsDeleted, RecordedOn)"
+            + Environment.NewLine + "VALUES ");
+
+        for (var i = 0; i < lineCount; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append("(@RunId, @BatchNo, @T").Append(i)
+              .Append(", @R").Append(i)
+              .Append(", SYSDATETIMEOFFSET())");
+        }
+
+        return sb.Append(';').ToString();
+    }
 
     public const string CheckpointSlice = """
         UPDATE Purge.RunBatchProgress

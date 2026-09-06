@@ -50,6 +50,40 @@ public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
             yield return $"Purge.{t}";
     }
 
+    /// <summary>
+    /// Colonne aggiunte da una migrazione successiva alla creazione della
+    /// tabella. La tabella esiste anche senza, quindi il controllo per nome
+    /// tabella non le vedrebbe: mancherebbero al primo INSERT, a meta' della
+    /// prima slice, con la transazione gia' aperta sulle tabelle di dominio.
+    /// </summary>
+    private static readonly (string Table, string Column, string Script)[] ExpectedColumns =
+    [
+        ("Purge.PurgeRun", "StagingPurgedOn", "005_housekeeping.sql"),
+        ("Purge.RunCandidateOrder", "CollectiveOrderId", "006_collective_atomicity.sql"),
+        ("Purge.RunCandidateCollective", "BatchNo", "006_collective_atomicity.sql"),
+        ("Purge.PurgeAudit", "BatchNo", "008_audit_trail.sql"),
+    ];
+
+    private const string ColumnQuery = """
+        SELECT QUOTENAME(s.name) + '.' + QUOTENAME(t.name) + '.' + QUOTENAME(c.name)
+        FROM sys.columns c
+        JOIN sys.tables t  ON t.object_id = c.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE s.name = 'Purge';
+        """;
+
+    private async Task<IReadOnlyList<string>> FindMissingColumnsAsync(CancellationToken ct)
+    {
+        var present = (await sql.QueryAsync(ColumnQuery, r => r.GetString(0), ct).ConfigureAwait(false))
+            .Select(n => n.Replace("[", string.Empty).Replace("]", string.Empty))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return ExpectedColumns
+            .Where(c => !present.Contains($"{c.Table}.{c.Column}"))
+            .Select(c => $"{c.Table}.{c.Column} (eseguire {c.Script})")
+            .ToList();
+    }
+
     /// <summary>Restituisce le tabelle attese e assenti. Vuoto = schema allineato.</summary>
     public async Task<IReadOnlyList<string>> FindMissingAsync(CancellationToken ct)
     {
@@ -88,6 +122,19 @@ public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
                 $"Tabelle assenti: {string.Join(", ", missing)}. " +
                 "Verificare di essere sul database corretto e che le migrazioni " +
                 "applicative siano allineate.");
+        }
+
+        var missingColumns = await FindMissingColumnsAsync(ct).ConfigureAwait(false);
+        if (missingColumns.Count > 0)
+        {
+            log.LogError(
+                "Verifica schema fallita: {Count} colonne attese ma assenti.{NewLine}  {List}",
+                missingColumns.Count, Environment.NewLine,
+                string.Join(Environment.NewLine + "  ", missingColumns));
+
+            throw new InvalidOperationException(
+                "Lo schema Purge e' incompleto: alcune migrazioni non sono state applicate. " +
+                $"Colonne assenti: {string.Join(", ", missingColumns)}.");
         }
     }
 }

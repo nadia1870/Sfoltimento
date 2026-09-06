@@ -63,6 +63,20 @@ public sealed class PurgeOptions
     [Range(30, 3600)]
     public int CommandTimeoutSeconds { get; set; } = 300;
 
+    // ---------------------------------------------------------------- audit
+
+    /// <summary>
+    /// Produce il conteggio previsionale anche per i run reali, non solo per i
+    /// dry-run. E' cio' che rende confrontabile Purge.vDryRunVsActual: senza,
+    /// la view ha solo il previsto dei dry-run e l'effettivo dei run reali,
+    /// che hanno RunId diversi e non si incontrano mai.
+    ///
+    /// Costa una passata di conteggi sullo staging prima dell'esecuzione.
+    /// Disattivarlo solo se quella passata risulta insostenibile sui volumi
+    /// reali, accettando di perdere il riscontro a posteriori.
+    /// </summary>
+    public bool AuditBaselineEnabled { get; set; } = true;
+
     // ---------------------------------------------------------- housekeeping
 
     /// <summary>

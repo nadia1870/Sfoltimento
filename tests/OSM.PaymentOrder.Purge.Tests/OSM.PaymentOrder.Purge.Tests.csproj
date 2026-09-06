@@ -29,6 +29,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\006_collective_atomicity.sql" Link="006_collective_atomicity.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="..\..\db\008_audit_trail.sql" Link="008_audit_trail.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
 
 <ItemGroup>

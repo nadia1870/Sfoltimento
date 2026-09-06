@@ -34,7 +34,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
 
         foreach (var script in new[]
                  { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
-                   "006_collective_atomicity.sql" })
+                   "006_collective_atomicity.sql", "008_audit_trail.sql" })
             await RunScriptAsync(script);
 
         Services = BuildServices();

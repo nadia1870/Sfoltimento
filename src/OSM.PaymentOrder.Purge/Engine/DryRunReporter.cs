@@ -88,6 +88,15 @@ public sealed class DryRunReporter(SqlExecutor sql, ILogger<DryRunReporter> log)
 
     private async Task PersistAsync(DryRunReport report, CancellationToken ct)
     {
+        // Ripulisce prima di inserire. Il planning viene rieseguito se il
+        // processo cade in quella fase, e senza questa DELETE il run avrebbe
+        // due righe per tabella: Purge.vDryRunVsActual le moltiplicherebbe,
+        // riportando uno scostamento inventato. Stessa ragione della DELETE
+        // in InitializeBatchProgress.
+        await sql.ExecuteAsync(
+            "DELETE FROM Purge.DryRunReport WHERE RunId = @RunId;",
+            ct, SqlParam.Of("@RunId", report.RunId)).ConfigureAwait(false);
+
         const string insert = """
             INSERT INTO Purge.DryRunReport (RunId, TableName, RowCountEstimate, ProducedOn)
             VALUES (@RunId, @Table, @Count, @On);

@@ -139,13 +139,8 @@ public sealed class PurgeRunStore(SqlExecutor sql)
             SqlParam.Of("@BatchNo", batchNo), SqlParam.Of("@Reason", reason));
     }
 
-    public Task RecordAuditAsync(Guid runId, string table, long rows, CancellationToken ct)
-    {
-        const string i = """
-            INSERT INTO Purge.PurgeAudit (RunId, TableName, RowsDeleted, RecordedOn)
-            VALUES (@RunId, @Table, @Rows, SYSDATETIMEOFFSET());
-            """;
-        return sql.ExecuteAsync(i, ct, SqlParam.Of("@RunId", runId),
-            SqlParam.Of("@Table", table), SqlParam.Of("@Rows", rows));
-    }
+    // Purge.PurgeAudit non si scrive da qui. La scrittura sta in
+    // SliceExecutor, dentro la transazione della slice: un secondo percorso
+    // fuori transazione potrebbe registrare cancellazioni poi annullate dal
+    // rollback, che e' esattamente l'errore che l'audit dovrebbe escludere.
 }
