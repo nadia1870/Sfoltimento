@@ -34,6 +34,21 @@ public sealed class PurgeOptions
     /// </summary>
     public bool AbandonedEnabled { get; set; }
 
+    /// <summary>
+    /// Righe esaminate per pagina in selezione ed espansione.
+    ///
+    /// Sotto la soglia di lock escalation di SQL Server (circa 5.000 lock per
+    /// statement): la pagina legge da Order, e un lock condiviso escalato a
+    /// livello di tabella bloccherebbe l'operativita', che e' precisamente
+    /// cio' che il resto del motore evita.
+    ///
+    /// Alzarlo riduce il numero di andate e ritorno, abbassarlo riduce la
+    /// durata del singolo statement. Il valore va tarato osservando le
+    /// pagine registrate nel log di selezione.
+    /// </summary>
+    [Range(500, 50000)]
+    public int SelectionBatchSize { get; set; } = 4000;
+
     // ------------------------------------------------------------ slicing
 
     /// <summary>

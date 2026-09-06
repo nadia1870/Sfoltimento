@@ -164,23 +164,33 @@ BEGIN
     (
         Id          BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PurgeAudit PRIMARY KEY,
         RunId       UNIQUEIDENTIFIER NOT NULL,
+        BatchNo     INT              NULL,
         TableName   NVARCHAR(128)    NOT NULL,
         RowsDeleted BIGINT           NOT NULL,
         RecordedOn  DATETIMEOFFSET   NOT NULL
     );
     CREATE NONCLUSTERED INDEX IX_PA_Run ON Purge.PurgeAudit (RunId);
+    CREATE NONCLUSTERED INDEX IX_PA_Run_Table
+        ON Purge.PurgeAudit (RunId, TableName) INCLUDE (RowsDeleted, BatchNo);
 END
 GO
 
+/* L'audit e' append-only, con una riga per (RunId, BatchNo, tabella):
+   l'aggregazione per run la fa la view.                                  */
 IF OBJECT_ID('Purge.vDryRunVsActual') IS NOT NULL DROP VIEW Purge.vDryRunVsActual;
 GO
 CREATE VIEW Purge.vDryRunVsActual AS
-SELECT d.RunId, d.TableName,
+SELECT d.RunId,
+       d.TableName,
        Previsto    = d.RowCountEstimate,
        Effettivo   = ISNULL(a.RowsDeleted, 0),
        Scostamento = ISNULL(a.RowsDeleted, 0) - d.RowCountEstimate
 FROM Purge.DryRunReport AS d
-LEFT JOIN Purge.PurgeAudit AS a ON a.RunId = d.RunId AND a.TableName = d.TableName;
+LEFT JOIN (
+    SELECT RunId, TableName, RowsDeleted = SUM(RowsDeleted)
+    FROM Purge.PurgeAudit
+    GROUP BY RunId, TableName
+) AS a ON a.RunId = d.RunId AND a.TableName = d.TableName;
 GO
 
 /* =====================================================================

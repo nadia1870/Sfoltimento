@@ -32,3 +32,17 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_CollectiveOrder_Purge'
 CREATE NONCLUSTERED INDEX IX_CollectiveOrder_Purge
     ON PaymentOrder.CollectiveOrder (ExecutionDate) INCLUDE (StatusCode);
 GO
+
+/* Piani ricorrenti (§10.6). La soglia e' su StandingOrder.LastExecutionDate,
+   non su Order.ExecutionDate: senza questo indice la selezione scandisce
+   l'intera StandingOrder, e la paginazione a chiave non ha una chiave su cui
+   cercare. Filtrato sui piani con scadenza, perche' quelli senza non sono
+   eleggibili (PA-6) e occuperebbero l'indice senza mai comparire nei
+   risultati. La chiave di clustering (Id) e' accodata da SQL Server, ed e'
+   proprio il secondo termine della filigrana. */
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_StandingOrder_Purge'
+               AND object_id=OBJECT_ID('PaymentOrder.StandingOrder'))
+CREATE NONCLUSTERED INDEX IX_StandingOrder_Purge
+    ON PaymentOrder.StandingOrder (LastExecutionDate) INCLUDE (OrderId)
+    WHERE LastExecutionDate IS NOT NULL;
+GO

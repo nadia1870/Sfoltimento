@@ -25,60 +25,158 @@ public static class RetentionSql
     // FASE 1 — SELEZIONE
     // =================================================================
 
-    /// <summary>Ordini conclusi oltre la soglia (§10.4).</summary>
+    // -----------------------------------------------------------------
+    // Le selezioni procedono a pagine, non con un unico INSERT..SELECT.
+    //
+    // Su dati storici quello statement apriva una transazione implicita
+    // sull'intera tabella Order: log in crescita e lock lunghi proprio nel
+    // punto in cui tutto il resto del motore evita di prenderne.
+    //
+    // La paginazione e' a chiave, non con OFFSET ne' con un TOP filtrato da
+    // NOT EXISTS: entrambi riscandiscono dall'inizio a ogni giro e
+    // abbandonano l'indice filtrato di 002_indexes.sql, rendendo il ciclo
+    // piu' lento dello statement unico che sostituisce. Ogni pagina riparte
+    // invece da (@LastAnchor, @LastId), che e' esattamente la chiave di quel
+    // l'indice: la colonna data piu' la chiave di clustering che SQL Server
+    // vi accoda. Il costo totale resta una passata sola.
+    //
+    // Il NOT EXISTS sullo staging resta, ma come guardia di idempotenza e non
+    // come meccanismo di avanzamento: se il processo cade a meta' selezione
+    // la fase viene rieseguita da capo e le righe gia' presenti non vengono
+    // duplicate. La ripresa ricomincia dalla prima pagina, perche' la
+    // filigrana vive in memoria: e' una riscansione dell'indice, non una
+    // riselezione, e la si paga solo dopo un'interruzione.
+    // -----------------------------------------------------------------
+
+    /// <summary>Ordini conclusi oltre la soglia (§10.4). Una pagina.</summary>
     public const string SelectTerminated = $"""
-        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
-        SELECT @RunId, o.Id, 'Selected'
+        SET NOCOUNT ON;
+
+        DECLARE @page TABLE (OrderId UNIQUEIDENTIFIER PRIMARY KEY,
+                             Anchor  DATETIME2 NOT NULL);
+        DECLARE @Scanned INT, @Inserted INT;
+
+        INSERT INTO @page (OrderId, Anchor)
+        SELECT TOP (@BatchSize) o.Id, o.ExecutionDate
         FROM {S}.[Order] AS o
         WHERE o.StatusCode IN ({TerminalStates})
           AND o.StandingOrder = 0
           AND o.ExecutionDate >= '{MinValidDate}'
           AND o.ExecutionDate <  @Cutoff
+          AND (o.ExecutionDate >  @LastAnchor
+            OR (o.ExecutionDate = @LastAnchor AND o.Id > @LastId))
           AND NOT EXISTS (SELECT 1 FROM {S}.Model AS m WHERE m.OrderId = o.Id)
           AND NOT EXISTS (SELECT 1 FROM {S}.CollectiveOrderGroupOrder AS c
                           WHERE c.OrderId = o.Id)
-          AND NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
-                          WHERE x.RunId = @RunId AND x.OrderId = o.Id);
+        ORDER BY o.ExecutionDate, o.Id;
+
+        SET @Scanned = @@ROWCOUNT;
+
+        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
+        SELECT @RunId, p.OrderId, 'Selected'
+        FROM @page AS p
+        WHERE NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
+                          WHERE x.RunId = @RunId AND x.OrderId = p.OrderId);
+
+        SET @Inserted = @@ROWCOUNT;
+
+        SELECT Inserted   = @Inserted,
+               Scanned    = @Scanned,
+               NextAnchor = (SELECT MAX(Anchor) FROM @page),
+               NextId     = (SELECT TOP (1) OrderId FROM @page
+                             ORDER BY Anchor DESC, OrderId DESC);
         """;
 
     /// <summary>
     /// Ordini abbandonati (§10.5): mai autorizzati, quindi privi di scrittura
-    /// contabile. Ancoraggio su CreationDate e soglia dedicata.
+    /// contabile. Ancoraggio su CreationDate e soglia dedicata, che e' anche
+    /// la chiave di IX_Order_Purge_Abandoned su cui pagina.
     /// Gli stati attivi restano esclusi: un ordine vecchio in Processing o
     /// Suspended è un'anomalia da investigare, non un candidato.
     /// </summary>
     public const string SelectAbandoned = $"""
-        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
-        SELECT @RunId, o.Id, 'Selected'
+        SET NOCOUNT ON;
+
+        DECLARE @page TABLE (OrderId UNIQUEIDENTIFIER PRIMARY KEY,
+                             Anchor  DATETIME2 NOT NULL);
+        DECLARE @Scanned INT, @Inserted INT;
+
+        INSERT INTO @page (OrderId, Anchor)
+        SELECT TOP (@BatchSize) o.Id, o.CreationDate
         FROM {S}.[Order] AS o
         WHERE o.StatusCode IN ('Created','PartiallyAuthorised')
           AND o.CreationDate < @Cutoff
+          AND (o.CreationDate >  @LastAnchor
+            OR (o.CreationDate = @LastAnchor AND o.Id > @LastId))
           AND NOT EXISTS (SELECT 1 FROM {S}.Model AS m WHERE m.OrderId = o.Id)
           AND NOT EXISTS (SELECT 1 FROM {S}.CollectiveOrderGroupOrder AS c
                           WHERE c.OrderId = o.Id)
-          AND NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
-                          WHERE x.RunId = @RunId AND x.OrderId = o.Id);
+        ORDER BY o.CreationDate, o.Id;
+
+        SET @Scanned = @@ROWCOUNT;
+
+        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
+        SELECT @RunId, p.OrderId, 'Selected'
+        FROM @page AS p
+        WHERE NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
+                          WHERE x.RunId = @RunId AND x.OrderId = p.OrderId);
+
+        SET @Inserted = @@ROWCOUNT;
+
+        SELECT Inserted   = @Inserted,
+               Scanned    = @Scanned,
+               NextAnchor = (SELECT MAX(Anchor) FROM @page),
+               NextId     = (SELECT TOP (1) OrderId FROM @page
+                             ORDER BY Anchor DESC, OrderId DESC);
         """;
 
     /// <summary>
     /// Piani ricorrenti (§10.6). LastExecutionDate NULL significa piano senza
     /// scadenza: non eleggibile per quanto vecchia sia la testata. È il rischio
     /// funzionale più grave dell'intera soluzione.
+    ///
+    /// Qui la filigrana e' su StandingOrder, non su Order: il predicato di
+    /// soglia e' su so.LastExecutionDate, quindi e' quella la colonna che
+    /// guida la scansione (indice IX_StandingOrder_Purge).
     /// </summary>
     public const string SelectStandingOrders = $"""
-        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
-        SELECT @RunId, o.Id, 'Selected'
-        FROM {S}.[Order] AS o
-        INNER JOIN {S}.StandingOrder AS so ON so.OrderId = o.Id
-        WHERE o.StatusCode IN ({TerminalStates})
-          AND o.StandingOrder = 1
-          AND so.LastExecutionDate IS NOT NULL
+        SET NOCOUNT ON;
+
+        DECLARE @page TABLE (StandingOrderId UNIQUEIDENTIFIER PRIMARY KEY,
+                             OrderId         UNIQUEIDENTIFIER NOT NULL,
+                             Anchor          DATETIME2 NOT NULL);
+        DECLARE @Scanned INT, @Inserted INT;
+
+        INSERT INTO @page (StandingOrderId, OrderId, Anchor)
+        SELECT TOP (@BatchSize) so.Id, o.Id, so.LastExecutionDate
+        FROM {S}.StandingOrder AS so
+        INNER JOIN {S}.[Order] AS o ON o.Id = so.OrderId
+        WHERE so.LastExecutionDate IS NOT NULL
           AND so.LastExecutionDate < @Cutoff
+          AND (so.LastExecutionDate >  @LastAnchor
+            OR (so.LastExecutionDate = @LastAnchor AND so.Id > @LastId))
+          AND o.StatusCode IN ({TerminalStates})
+          AND o.StandingOrder = 1
           AND NOT EXISTS (SELECT 1 FROM {S}.Model AS m WHERE m.OrderId = o.Id)
           AND NOT EXISTS (SELECT 1 FROM {S}.CollectiveOrderGroupOrder AS c
                           WHERE c.OrderId = o.Id)
-          AND NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
-                          WHERE x.RunId = @RunId AND x.OrderId = o.Id);
+        ORDER BY so.LastExecutionDate, so.Id;
+
+        SET @Scanned = @@ROWCOUNT;
+
+        INSERT INTO Purge.RunCandidateOrder (RunId, OrderId, State)
+        SELECT @RunId, p.OrderId, 'Selected'
+        FROM @page AS p
+        WHERE NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrder AS x
+                          WHERE x.RunId = @RunId AND x.OrderId = p.OrderId);
+
+        SET @Inserted = @@ROWCOUNT;
+
+        SELECT Inserted   = @Inserted,
+               Scanned    = @Scanned,
+               NextAnchor = (SELECT MAX(Anchor) FROM @page),
+               NextId     = (SELECT TOP (1) StandingOrderId FROM @page
+                             ORDER BY Anchor DESC, StandingOrderId DESC);
         """;
 
     /// <summary>
@@ -153,46 +251,105 @@ public static class RetentionSql
                           WHERE existing.RunId = @RunId AND existing.OrderId = cgo.OrderId);
         """;
 
-    /// <summary>Storici orfani (C1): non raggiungibili partendo da Order.</summary>
+    /// <summary>
+    /// Storici orfani (C1): non raggiungibili partendo da Order.
+    /// Pagina su UpdatedOn, chiave di IX_OrderHistory_Orphan.
+    /// </summary>
     public const string SelectOrphanHistory = $"""
-        INSERT INTO Purge.RunCandidateOrderHistory (RunId, OrderHistoryId, OrderId)
-        SELECT @RunId, oh.Id, NULL
+        SET NOCOUNT ON;
+
+        DECLARE @page TABLE (OrderHistoryId UNIQUEIDENTIFIER PRIMARY KEY,
+                             Anchor         DATETIME2 NOT NULL);
+        DECLARE @Scanned INT, @Inserted INT;
+
+        INSERT INTO @page (OrderHistoryId, Anchor)
+        SELECT TOP (@BatchSize) oh.Id, oh.UpdatedOn
         FROM {S}.OrderHistory AS oh
         WHERE oh.OrderRefId IS NULL
           AND oh.UpdatedOn < @Cutoff
-          AND NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrderHistory AS x
-                          WHERE x.RunId = @RunId AND x.OrderHistoryId = oh.Id);
+          AND (oh.UpdatedOn >  @LastAnchor
+            OR (oh.UpdatedOn = @LastAnchor AND oh.Id > @LastId))
+        ORDER BY oh.UpdatedOn, oh.Id;
+
+        SET @Scanned = @@ROWCOUNT;
+
+        INSERT INTO Purge.RunCandidateOrderHistory (RunId, OrderHistoryId, OrderId)
+        SELECT @RunId, p.OrderHistoryId, NULL
+        FROM @page AS p
+        WHERE NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrderHistory AS x
+                          WHERE x.RunId = @RunId AND x.OrderHistoryId = p.OrderHistoryId);
+
+        SET @Inserted = @@ROWCOUNT;
+
+        SELECT Inserted   = @Inserted,
+               Scanned    = @Scanned,
+               NextAnchor = (SELECT MAX(Anchor) FROM @page),
+               NextId     = (SELECT TOP (1) OrderHistoryId FROM @page
+                             ORDER BY Anchor DESC, OrderHistoryId DESC);
         """;
 
     // =================================================================
     // FASE 2 — ESPANSIONE
     // =================================================================
 
-    public const string ExpandOrderHistory = $"""
+    /// <summary>
+    /// Espansione degli storici e calcolo del peso, una pagina di candidati
+    /// per volta.
+    ///
+    /// Le due operazioni erano due passate distinte sull'intero set. Il peso
+    /// di un ordine dipende pero' solo dai propri storici, quindi si calcola
+    /// sulla stessa pagina appena espansa: una passata invece di due, e nessun
+    /// momento in cui l'intero set di candidati e' sotto UPDATE.
+    ///
+    /// La filigrana e' il solo OrderId, che e' la chiave clusterizzata dello
+    /// staging dopo RunId: la pagina e' una scansione di intervallo.
+    /// Un OrderId tutto a zero non verrebbe mai selezionato, perche' la
+    /// sentinella iniziale coincide con quel valore. In pratica non esiste, ma
+    /// vale la pena saperlo prima di scoprirlo.
+    /// </summary>
+    public const string ExpandAndWeigh = $"""
+        SET NOCOUNT ON;
+
+        DECLARE @page TABLE (OrderId UNIQUEIDENTIFIER PRIMARY KEY);
+        DECLARE @Scanned INT, @Inserted INT;
+
+        INSERT INTO @page (OrderId)
+        SELECT TOP (@BatchSize) c.OrderId
+        FROM Purge.RunCandidateOrder AS c
+        WHERE c.RunId = @RunId
+          AND c.State = 'Selected'
+          AND c.OrderId > @LastId
+        ORDER BY c.OrderId;
+
+        SET @Scanned = @@ROWCOUNT;
+
         INSERT INTO Purge.RunCandidateOrderHistory (RunId, OrderHistoryId, OrderId)
         SELECT @RunId, oh.Id, oh.OrderRefId
         FROM {S}.OrderHistory AS oh
-        INNER JOIN Purge.RunCandidateOrder AS c
-                ON c.OrderId = oh.OrderRefId AND c.RunId = @RunId
-        WHERE c.State = 'Selected'
-          AND NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrderHistory AS x
+        INNER JOIN @page AS p ON p.OrderId = oh.OrderRefId
+        WHERE NOT EXISTS (SELECT 1 FROM Purge.RunCandidateOrderHistory AS x
                           WHERE x.RunId = @RunId AND x.OrderHistoryId = oh.Id);
-        """;
 
-    /// <summary>
-    /// Peso in righe per ordine: testata + (storico testata + storico dettaglio).
-    /// Il dettaglio corrente è 1:1 e trascurabile ai fini del bilanciamento.
-    /// </summary>
-    public const string ComputeWeights = """
+        SET @Inserted = @@ROWCOUNT;
+
+        -- Peso in righe per ordine: testata + (storico testata + storico
+        -- dettaglio). Il dettaglio corrente e' 1:1 e trascurabile ai fini del
+        -- bilanciamento.
         UPDATE c
            SET c.RowWeight = 1 + ISNULL(h.Cnt, 0) * 2
         FROM Purge.RunCandidateOrder AS c
+        INNER JOIN @page AS p ON p.OrderId = c.OrderId
         OUTER APPLY (
             SELECT Cnt = COUNT(*)
             FROM Purge.RunCandidateOrderHistory AS h
             WHERE h.RunId = c.RunId AND h.OrderId = c.OrderId
         ) AS h
-        WHERE c.RunId = @RunId AND c.State = 'Selected';
+        WHERE c.RunId = @RunId;
+
+        SELECT Inserted   = @Inserted,
+               Scanned    = @Scanned,
+               NextAnchor = CAST(NULL AS DATETIME2),
+               NextId     = (SELECT MAX(OrderId) FROM @page);
         """;
 
     /// <summary>Candidati ordinati per il bin packing streaming (§6.3).</summary>

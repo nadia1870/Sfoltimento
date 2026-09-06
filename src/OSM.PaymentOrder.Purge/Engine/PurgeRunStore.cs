@@ -1,3 +1,4 @@
+using System.Data;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Sql;
@@ -30,8 +31,8 @@ public sealed class PurgeRunStore(SqlExecutor sql)
             SqlParam.Of("@Strategy", strategy.ToString()),
             SqlParam.Of("@DryRun", options.DryRun),
             SqlParam.Of("@AnchorMode", options.AnchorMode.ToString()),
-            SqlParam.Of("@Cutoff", options.ComputeRetentionCutoff(reference)),
-            SqlParam.Of("@AbandonedCutoff", options.ComputeAbandonedCutoff(reference)),
+            SqlParam.Typed("@Cutoff", options.ComputeRetentionCutoff(reference), SqlDbType.DateTime2),
+            SqlParam.Typed("@AbandonedCutoff", options.ComputeAbandonedCutoff(reference), SqlDbType.DateTime2),
             SqlParam.Of("@MaxRows", options.MaxRowsPerBatch),
             SqlParam.Of("@MaxOrders", options.MaxOrdersPerBatch)).ConfigureAwait(false);
 

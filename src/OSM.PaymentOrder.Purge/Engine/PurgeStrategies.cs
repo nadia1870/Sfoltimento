@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Extensions.Logging;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
@@ -44,7 +45,7 @@ public enum PurgePlanningMode
 }
 
 public abstract class PurgeStrategyBase(
-    SqlExecutor sql,
+    BatchedStatementRunner batched,
     ILogger log) : IPurgeStrategy
 {
     public abstract RetentionStrategy Type { get; }
@@ -58,15 +59,11 @@ public abstract class PurgeStrategyBase(
 
     public virtual async Task ExpandAsync(PurgeRun run, CancellationToken ct)
     {
-        var histories = await sql.ExecuteAsync(
-            RetentionSql.ExpandOrderHistory,
-            ct,
-            SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
-
-        await sql.ExecuteAsync(
-            RetentionSql.ComputeWeights,
-            ct,
-            SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
+        var histories = await batched.RunAsync(
+            $"PurgeExpansion{Type}",
+            run.RunId,
+            RetentionSql.ExpandAndWeigh,
+            ct).ConfigureAwait(false);
 
         log.LogInformation(
             "PurgeExpansionCompleted RunId={RunId} Strategy={Strategy} Storici={Histories}",
@@ -76,19 +73,20 @@ public abstract class PurgeStrategyBase(
     public virtual IEnumerable<(string Table, string Sql)> GetSliceStatements() =>
         RetentionSql.SliceStatements(UsesAbandonedDeletes);
 
-    protected async Task<int> ExecuteSelectionAsync(
+    protected Task<int> ExecuteSelectionAsync(
         string statement,
         PurgeRun run,
         CancellationToken ct) =>
-        await sql.ExecuteAsync(
+        batched.RunAsync(
+            $"PurgeSelection{Type}",
+            run.RunId,
             statement,
             ct,
-            SqlParam.Of("@RunId", run.RunId),
-            SqlParam.Of("@Cutoff", CutoffOf(run))).ConfigureAwait(false);
+            SqlParam.Typed("@Cutoff", CutoffOf(run), SqlDbType.DateTime2));
 }
 
-public sealed class TerminatedStrategy(SqlExecutor sql, ILogger<TerminatedStrategy> log)
-    : PurgeStrategyBase(sql, log)
+public sealed class TerminatedStrategy(BatchedStatementRunner batched, ILogger<TerminatedStrategy> log)
+    : PurgeStrategyBase(batched, log)
 {
     public override RetentionStrategy Type => RetentionStrategy.Terminated;
 
@@ -102,8 +100,8 @@ public sealed class TerminatedStrategy(SqlExecutor sql, ILogger<TerminatedStrate
     }
 }
 
-public sealed class AbandonedStrategy(SqlExecutor sql, ILogger<AbandonedStrategy> log)
-    : PurgeStrategyBase(sql, log)
+public sealed class AbandonedStrategy(BatchedStatementRunner batched, ILogger<AbandonedStrategy> log)
+    : PurgeStrategyBase(batched, log)
 {
     public override DateTime CutoffOf(PurgeRun run) =>
         run.AbandonedCutoff ?? throw new InvalidOperationException(
@@ -122,8 +120,8 @@ public sealed class AbandonedStrategy(SqlExecutor sql, ILogger<AbandonedStrategy
     }
 }
 
-public sealed class StandingOrdersStrategy(SqlExecutor sql, ILogger<StandingOrdersStrategy> log)
-    : PurgeStrategyBase(sql, log)
+public sealed class StandingOrdersStrategy(BatchedStatementRunner batched, ILogger<StandingOrdersStrategy> log)
+    : PurgeStrategyBase(batched, log)
 {
     public override RetentionStrategy Type => RetentionStrategy.StandingOrders;
 
@@ -137,8 +135,23 @@ public sealed class StandingOrdersStrategy(SqlExecutor sql, ILogger<StandingOrde
     }
 }
 
-public sealed class CollectiveStrategy(SqlExecutor sql, ILogger<CollectiveStrategy> log)
-    : PurgeStrategyBase(sql, log)
+/// <summary>
+/// I collettivi restano su statement singoli, non paginati.
+///
+/// Non e' una dimenticanza. La selezione collettiva ha invarianti che
+/// attraversano l'intero insieme: ValidateOrderBelongsToSingleCollective
+/// verifica che nessun ordine appartenga a due collettivi eleggibili, e
+/// SelectCollectiveComponents deve vedere tutti i collettivi selezionati.
+/// Paginare qui significa decidere cosa voglia dire quell'invariante su una
+/// selezione ancora incompleta, ed e' una decisione che va presa a parte.
+/// La popolazione dei collettivi e' inoltre di un altro ordine di grandezza
+/// rispetto a quella degli ordini.
+/// </summary>
+public sealed class CollectiveStrategy(
+    SqlExecutor sql,
+    BatchedStatementRunner batched,
+    ILogger<CollectiveStrategy> log)
+    : PurgeStrategyBase(batched, log)
 {
     private readonly SqlExecutor _sql = sql;
     public override RetentionStrategy Type => RetentionStrategy.Collective;
@@ -156,7 +169,7 @@ public sealed class CollectiveStrategy(SqlExecutor sql, ILogger<CollectiveStrate
         var p = new[]
         {
             SqlParam.Of("@RunId", run.RunId),
-            SqlParam.Of("@Cutoff", CutoffOf(run))
+            SqlParam.Typed("@Cutoff", CutoffOf(run), SqlDbType.DateTime2)
         };
 
         var eligible = await _sql.ExecuteAsync(RetentionSql.SelectEligibleCollectives, ct, p)
@@ -204,8 +217,8 @@ public sealed class CollectiveStrategy(SqlExecutor sql, ILogger<CollectiveStrate
     }
 }
 
-public sealed class OrphanHistoryStrategy(SqlExecutor sql, ILogger<OrphanHistoryStrategy> log)
-    : PurgeStrategyBase(sql, log)
+public sealed class OrphanHistoryStrategy(BatchedStatementRunner batched, ILogger<OrphanHistoryStrategy> log)
+    : PurgeStrategyBase(batched, log)
 {
     public override RetentionStrategy Type => RetentionStrategy.OrphanHistory;
     public override PurgePlanningMode PlanningMode => PurgePlanningMode.OrphanHistory;

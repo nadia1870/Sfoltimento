@@ -1,10 +1,20 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 
 namespace OSM.PaymentOrder.Purge.Data;
 
-public readonly record struct SqlParam(string Name, object? Value)
+public readonly record struct SqlParam(string Name, object? Value, SqlDbType? Type = null)
 {
     public static SqlParam Of(string name, object? value) => new(name, value);
+
+    /// <summary>
+    /// Parametro con tipo dichiarato, dove l'inferenza di AddWithValue non va
+    /// bene. Un DateTime diventa SqlDbType.DateTime, il cui minimo e' il 1753:
+    /// la data sentinella da cui parte la paginazione solleverebbe
+    /// un'eccezione prima ancora di raggiungere il server.
+    /// </summary>
+    public static SqlParam Typed(string name, object? value, SqlDbType type) =>
+        new(name, value, type);
 }
 
 /// <summary>
@@ -32,7 +42,13 @@ public sealed class SqlExecutor(string connectionString, int commandTimeoutSecon
         cmd.CommandTimeout = CommandTimeoutSeconds;
         if (tx is not null) cmd.Transaction = tx;
         foreach (var p in parameters)
-            cmd.Parameters.AddWithValue(p.Name, p.Value ?? DBNull.Value);
+        {
+            if (p.Type is { } type)
+                cmd.Parameters.Add(p.Name, type).Value = p.Value ?? DBNull.Value;
+            else
+                cmd.Parameters.AddWithValue(p.Name, p.Value ?? DBNull.Value);
+        }
+
         return cmd;
     }
 

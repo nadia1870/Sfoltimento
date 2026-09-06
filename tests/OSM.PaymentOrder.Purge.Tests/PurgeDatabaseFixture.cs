@@ -51,6 +51,8 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
     public PurgeOptions Options => Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
     public RetentionOrchestrator Orchestrator => Services.GetRequiredService<RetentionOrchestrator>();
     public PurgeRunStore Store => Services.GetRequiredService<PurgeRunStore>();
+    public PurgeStrategyResolver Strategies =>
+        Services.GetRequiredService<PurgeStrategyResolver>();
 
     private ServiceProvider BuildServices()
     {
@@ -67,6 +69,12 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
             o.WindowEnabled = false;
             o.HousekeepingEnabled = false;
             o.MaxRowsPerBatch = 50;
+            // Deliberatamente sotto il minimo consentito in produzione. La
+            // validazione delle annotazioni non gira in fixture, e un valore
+            // cosi' basso fa si' che ogni test esistente attraversi piu'
+            // pagine di selezione invece di una sola: la paginazione viene
+            // cosi' esercitata ovunque, non solo nel test che la riguarda.
+            o.SelectionBatchSize = 7;
             o.MaxOrdersPerBatch = 10;
             o.InterSliceDelay = TimeSpan.Zero;
             o.RetryDelay = TimeSpan.Zero;
@@ -75,6 +83,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton<SchemaVerifier>();
         services.AddSingleton<PurgeHousekeeping>();
         services.AddSingleton<PurgeRunStore>();
+        services.AddSingleton<BatchedStatementRunner>();
 
         services.AddSingleton<IPurgeStrategy, TerminatedStrategy>();
         services.AddSingleton<IPurgeStrategy, AbandonedStrategy>();

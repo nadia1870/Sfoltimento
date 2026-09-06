@@ -96,6 +96,7 @@ public static class Program
         builder.Services.AddSingleton<SchemaVerifier>();
         builder.Services.AddSingleton<PurgeHousekeeping>();
         builder.Services.AddSingleton<PurgeRunStore>();
+        builder.Services.AddSingleton<BatchedStatementRunner>();
         builder.Services.AddSingleton<IPurgeStrategy, TerminatedStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, AbandonedStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, StandingOrdersStrategy>();
