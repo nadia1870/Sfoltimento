@@ -155,5 +155,59 @@ due slice la prima notte, si ferma alla chiusura della finestra e completa il
 resto la seconda, chiuderebbe con zero abbandoni e perderebbe l'informazione
 proprio nel caso in cui serve.
 
-**Conseguenza.** Una query in più per run, alla fine di `Executing`. Il contatore
-in memoria resta valido per il log della singola sessione.
+**Dove sta il conteggio.** In `IBatchWorkProvider`, non in `ExecutingPhase`.
+Il primo tentativo dava alla fase una dipendenza da `PurgeRunStore`, e questo
+trasformava quattro test unitari in test che avevano bisogno di un database.
+`BatchExecutionCoordinatorContractTests` verifica per riflessione che il
+coordinatore non conosca `PurgeRunStore`: quel vincolo era già scritto, e la
+prima versione lo aggirava passando dalla fase.
+
+Il risultato porta quindi due numeri: `AbandonedSlices` per la sessione, che
+serve al log, e `AbandonedTotal` per il run, che decide la fase finale.
+
+**Conseguenza.** Una query in più per run, alla fine di `Executing`.
+
+---
+
+## D-7 — Contesa e guasto seguono due strade diverse
+
+**Decisione.** In `SliceExecutor` i `catch` sono quattro e l'ordine conta:
+
+1. `SqlException` di **concorrenza** (1205, 1222, -2) → `SliceResult.Retryable`.
+   La stessa slice si riprova fra qualche secondo.
+2. `OperationCanceledException` → rollback e rilancio. Finestra chiusa.
+3. `SqlException` **transitoria ma non di concorrenza** → rollback e **rilancio**.
+   Connessione caduta: il run si interrompe e resta riprendibile.
+4. Tutto il resto → `SliceResult.Fatal`. La slice viene abbandonata.
+
+**Perché il terzo `catch` deve esistere.** È il caso che si dimentica. La prima
+versione classificava con `IsTransient` al punto 1, quindi una connessione caduta
+faceva riprovare la slice fino a esaurire i tentativi e poi l'abbandonava.
+Correggere il punto 1 in `IsConcurrency` senza aggiungere il punto 3 è peggio: la
+`SqlException` cade nel `catch` generico e diventa `Fatal`, cioè viene
+abbandonata **subito**, senza nemmeno i tre tentativi.
+
+In entrambi i casi il risultato è lo stesso: aggregati lasciati a database in via
+definitiva, e un run chiuso in `CompletedWithErrors`, per un guasto che sarebbe
+passato da solo.
+
+**La catena.** Il rilancio funziona perché nessuno lo intercetta per strada:
+`BatchExecutionCoordinator` non ha `try`, `ExecutingPhase` nemmeno, e
+`RetentionOrchestrator` lo riconosce con `IsInfrastructure` e registra
+un'interruzione senza cambiare fase. Modificare uno qualsiasi di questi tre punti
+aggiungendo una cattura rompe la proprietà senza che nessun test attuale se ne
+accorga, tranne
+`BatchExecutionCoordinatorTests.Executor_exception_propagates_without_abandoning`.
+
+**Cosa non è ancora verificato.** La classificazione è coperta da
+`SqlErrorsTests`, la propagazione dal coordinatore in su dal test appena citato,
+e il comportamento dell'orchestratore da `RunLifecycleTests`. Manca l'anello
+`SliceExecutor` stesso: non è isolabile finché `SqlExecutor` resta una classe
+concreta. È la ragione principale per introdurre `ISqlExecutor`.
+
+**Proprietà utile scoperta strada facendo.** Se il guasto colpisce
+`tx.CommitAsync`, lo stato è ambiguo: il commit può essere passato o no. Non è un
+problema perché il checkpoint di slice sta **dentro** la transazione. Se il
+commit è passato, la slice risulta `Completed` e non viene ripresa; se non è
+passato, resta `Pending`. Le due possibilità portano allo stesso comportamento
+corretto senza bisogno di distinguerle.

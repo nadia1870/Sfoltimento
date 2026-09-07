@@ -45,13 +45,25 @@ public static class SqlErrors
         49918, 49919, 49920     // nessuna risorsa per elaborare la richiesta
     ];
 
-    public static bool IsTransient(SqlException ex) =>
-        Concurrency.Contains(ex.Number) || Connection.Contains(ex.Number);
+    /// <summary>
+    /// Guasto passeggero di qualunque natura: il run resta riprendibile.
+    /// Serve all'orchestratore, che decide sul run intero.
+    /// </summary>
+    public static bool IsTransient(SqlException ex) => IsTransient(ex.Number);
+
+    public static bool IsTransient(int number) =>
+        Concurrency.Contains(number) || Connection.Contains(number);
 
     /// <summary>
-    /// Un deadlock o un timeout di lock: la slice puo' riprovare subito.
-    /// Distinta da IsTransient perche' un guasto di connessione non si risolve
-    /// con un ritardo di cinque secondi, mentre una contesa si.
+    /// Contesa con l'operativita': la slice puo' riprovare fra qualche secondo.
+    ///
+    /// Distinta da IsTransient perche' le due decisioni sono diverse. Una
+    /// contesa si risolve riprovando la stessa slice; una connessione caduta
+    /// no, e riprovarla brucia i tentativi disponibili fino ad abbandonare la
+    /// slice. Un'interruzione di rete diventerebbe cosi' un aggregato lasciato
+    /// a database in via definitiva, invece di un run da riprendere.
     /// </summary>
-    public static bool IsConcurrency(SqlException ex) => Concurrency.Contains(ex.Number);
+    public static bool IsConcurrency(SqlException ex) => IsConcurrency(ex.Number);
+
+    public static bool IsConcurrency(int number) => Concurrency.Contains(number);
 }

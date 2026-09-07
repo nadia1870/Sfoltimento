@@ -173,18 +173,33 @@ public sealed class BatchExecutionCoordinator(
                 abandoned);
         }
 
+        // Il totale viene riletto: il contatore locale vale solo per questa
+        // sessione, e un run che abbandona una notte e completa quella dopo
+        // risulterebbe pulito.
+        var abandonedTotal = await workProvider
+            .CountAbandonedAsync(run.RunId, ct).ConfigureAwait(false);
+
         return BatchExecutionResult.CompletedRun(
             completed,
             abandoned,
-            totalRows);
+            totalRows,
+            abandonedTotal);
     }
 }
 
+/// <summary>
+/// Esito dell'esecuzione dei batch.
+///
+/// AbandonedSlices conta questa sessione; AbandonedTotal conta il run. I due
+/// numeri divergono ogni volta che un run attraversa piu' finestre operative, e
+/// solo il secondo dice se il run sta lasciando aggregati a database.
+/// </summary>
 public sealed record BatchExecutionResult(
     bool Completed,
     int CompletedSlices,
     int AbandonedSlices,
-    long RowsDeleted)
+    long RowsDeleted,
+    int AbandonedTotal = 0)
 {
     public static BatchExecutionResult WindowClosed(
         int completedSlices,
@@ -195,6 +210,7 @@ public sealed record BatchExecutionResult(
     public static BatchExecutionResult CompletedRun(
         int completedSlices,
         int abandonedSlices,
-        long rowsDeleted) =>
-        new(true, completedSlices, abandonedSlices, rowsDeleted);
+        long rowsDeleted,
+        int abandonedTotal) =>
+        new(true, completedSlices, abandonedSlices, rowsDeleted, abandonedTotal);
 }

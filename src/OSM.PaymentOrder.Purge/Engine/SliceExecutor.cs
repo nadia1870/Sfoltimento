@@ -134,7 +134,11 @@ public sealed class SliceExecutor(
 
             return SliceResult.Ok(totalRows);
         }
-        catch (SqlException ex) when (SqlErrors.IsTransient(ex))
+        // IsConcurrency, non IsTransient: qui si decide se riprovare *questa
+        // slice*. Un deadlock si risolve riprovando la stessa slice fra qualche
+        // secondo; una connessione caduta no. I due casi sono separati, e il
+        // secondo e' gestito dal catch piu' sotto.
+        catch (SqlException ex) when (SqlErrors.IsConcurrency(ex))
         {
             await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
             log.LogWarning(ex, "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Sql={Number}",
@@ -144,6 +148,30 @@ public sealed class SliceExecutor(
         catch (OperationCanceledException)
         {
             await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+        catch (SqlException ex) when (SqlErrors.IsTransient(ex))
+        {
+            // Transitorio ma non di concorrenza: connessione caduta, rifiutata
+            // o azzerata. Non e' un problema di questa slice e non si risolve
+            // riprovandola.
+            //
+            // Questo catch deve esistere, e deve stare dopo quello sulla
+            // concorrenza. Senza, l'eccezione finirebbe nel catch generico e
+            // diventerebbe Fatal, che il coordinatore traduce in AbandonAsync:
+            // un guasto di rete lascerebbe aggregati a database in via
+            // definitiva, senza nemmeno consumare i tentativi previsti.
+            //
+            // Rilanciando, risale al coordinatore, che non cattura, e da li'
+            // all'orchestratore, che la riconosce come guasto e lascia il run
+            // riprendibile dal checkpoint.
+            await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
+
+            log.LogWarning(ex,
+                "PurgeSliceInterrupted RunId={RunId} BatchNo={BatchNo} Sql={Number} — " +
+                "guasto di connessione, il run resta riprendibile",
+                run.RunId, slice.BatchNo, ex.Number);
+
             throw;
         }
         catch (Exception ex)

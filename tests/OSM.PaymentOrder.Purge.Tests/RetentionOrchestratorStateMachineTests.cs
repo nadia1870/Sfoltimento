@@ -254,6 +254,15 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
 
         public Task AbandonAsync(Guid runId, int batchNo, string? reason, CancellationToken ct) =>
             Task.CompletedTask;
+
+        /// <summary>
+        /// Nessuna slice abbandonata: questi test provano le transizioni di fase,
+        /// non gli esiti dell'esecuzione. Un valore diverso da zero manderebbe ogni
+        /// run in CompletedWithErrors e le assert sulle transizioni fallirebbero
+        /// per il motivo sbagliato.
+        /// </summary>
+        public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
+            Task.FromResult(0);
     }
 
 

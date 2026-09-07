@@ -226,6 +226,31 @@ public sealed class BatchExecutionCoordinatorTests
         IsOversized = false
     };
 
+    /// <summary>
+    /// Un'eccezione dell'esecutore deve attraversare il coordinatore senza
+    /// essere tradotta in un abbandono.
+    ///
+    /// E' l'anello centrale della catena che porta un guasto di connessione
+    /// dalla slice all'orchestratore. Se il coordinatore la catturasse, o se
+    /// SliceExecutor la trasformasse in Fatal, la slice verrebbe abbandonata e
+    /// il run chiuderebbe in CompletedWithErrors: gli aggregati resterebbero a
+    /// database in via definitiva per un guasto passeggero.
+    /// </summary>
+    [Fact]
+    public async Task Executor_exception_propagates_without_abandoning()
+    {
+        var guasto = new TimeoutException("connessione caduta");
+        var workProvider = new FakeWorkProvider(Slice(1, 0), Slice(2, 0));
+        var coordinator = CreateSut(workProvider, FakeExecutor.Throwing(guasto));
+
+        var sollevata = await Assert.ThrowsAsync<TimeoutException>(
+            () => coordinator.ExecuteAsync(CreateRun(), CancellationToken.None));
+
+        Assert.Same(guasto, sollevata);
+        Assert.Empty(workProvider.Abandoned);
+        Assert.Empty(workProvider.RecordedAttempts);
+    }
+
     private sealed class FakeWorkProvider(params SliceInfo[] slices) : IBatchWorkProvider
     {
         private readonly Queue<SliceInfo> _slices = new(slices);
@@ -266,6 +291,19 @@ public sealed class BatchExecutionCoordinatorTests
             Abandoned.Add((batchNo, reason ?? string.Empty));
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// Deliberatamente non restituisce zero: il fake modella lo store, che
+        /// conta le slice abbandonate del run. PreviousSessionAbandoned simula
+        /// quelle lasciate da una finestra operativa precedente.
+        /// </summary>
+        public int PreviousSessionAbandoned { get; init; }
+
+        public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(Abandoned.Count + PreviousSessionAbandoned);
+        }
     }
 
     private sealed class FakeExecutor : IBatchExecutor
@@ -276,6 +314,14 @@ public sealed class BatchExecutionCoordinatorTests
         public FakeExecutor(params SliceResult[] results) => _results = new Queue<SliceResult>(results);
 
         public FakeExecutor(Func<PurgeRun, SliceInfo, SliceResult> onExecute) => _onExecute = onExecute;
+
+        /// <summary>
+        /// Solleva invece di restituire un esito. Serve a verificare che il
+        /// coordinatore non converta un'eccezione in un abbandono: un guasto
+        /// di connessione deve risalire, non lasciare aggregati a database.
+        /// </summary>
+        public static FakeExecutor Throwing(Exception ex) =>
+            new((_, _) => throw ex);
 
         public List<int> ExecutedBatches { get; } = [];
 

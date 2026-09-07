@@ -65,7 +65,9 @@ L'housekeeping trattava già i due casi in modo diverso, ma deducendolo da
 
 Il conteggio degli abbandoni viene letto dal database, non dal contatore
 dell'invocazione corrente: un run che abbandona una notte e completa quella dopo
-chiuderebbe altrimenti come pulito.
+chiuderebbe altrimenti come pulito. La lettura passa da `IBatchWorkProvider`,
+così il coordinatore resta senza dipendenze dalla persistenza e `ExecutingPhase`
+resta verificabile senza database.
 
 ## 6. Fasi terminali derivate dall'enum
 

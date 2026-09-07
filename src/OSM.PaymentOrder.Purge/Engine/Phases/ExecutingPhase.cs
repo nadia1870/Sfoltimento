@@ -4,8 +4,7 @@ using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 namespace OSM.PaymentOrder.Purge.Engine.Phases;
 
 public sealed class ExecutingPhase(
-    IBatchExecutionCoordinator coordinator,
-    PurgeRunStore store) : IPurgePhase
+    IBatchExecutionCoordinator coordinator) : IPurgePhase
 {
     private static readonly IReadOnlySet<RunPhase> Supported =
         new HashSet<RunPhase> { RunPhase.Executing };
@@ -22,16 +21,13 @@ public sealed class ExecutingPhase(
         if (!result.Completed)
             return PhaseResult.Stay();
 
-        // Il conteggio arriva dal database, non da result.AbandonedSlices.
-        // Quel contatore vale solo per l'invocazione corrente: un run che
-        // abbandona due slice la prima notte e ne completa il resto la seconda
-        // chiuderebbe con zero abbandoni e perderebbe l'informazione.
-        var abandoned = await store.CountAbandonedSlicesAsync(run.RunId, ct).ConfigureAwait(false);
-
-        return abandoned == 0
+        // AbandonedTotal, non AbandonedSlices: il secondo conta solo questa
+        // sessione, e un run che abbandona una notte e completa quella dopo
+        // chiuderebbe come pulito.
+        return result.AbandonedTotal == 0
             ? PhaseResult.Complete()
             : PhaseResult.CompleteWithErrors(
-                $"{abandoned} slice abbandonate: gli aggregati corrispondenti non sono " +
-                "stati cancellati e restano a database.");
+                $"{result.AbandonedTotal} slice abbandonate: gli aggregati " +
+                "corrispondenti non sono stati cancellati e restano a database.");
     }
 }
