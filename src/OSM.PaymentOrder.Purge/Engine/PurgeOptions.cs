@@ -72,6 +72,19 @@ public sealed class PurgeOptions
     [Range(1, 10)]
     public int MaxSliceAttempts { get; set; } = 3;
 
+    /// <summary>
+    /// Quante volte un run puo' essere interrotto da un guasto e ripreso prima
+    /// di essere dichiarato fallito.
+    ///
+    /// Un guasto non chiude il run: la fase resta il checkpoint da cui
+    /// riprendere. Senza un limite, pero', un problema che non passa — un disco
+    /// pieno, una credenziale scaduta — farebbe ripartire lo stesso run ogni
+    /// notte per sempre, sempre con lo stesso esito e senza che nessuno se ne
+    /// accorga. Superata la soglia il run diventa Failed e chiede attenzione.
+    /// </summary>
+    [Range(1, 50)]
+    public int MaxRunInterruptions { get; set; } = 5;
+
     public TimeSpan InterSliceDelay { get; set; } = TimeSpan.FromMilliseconds(100);
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(5);
 

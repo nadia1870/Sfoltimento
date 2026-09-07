@@ -57,6 +57,33 @@ public sealed class ExecutingPhaseTests
         Assert.Equal(cts.Token, coordinator.Token);
     }
 
+    [Fact]
+    public async Task Abandoned_slices_complete_phase_with_errors()
+    {
+        // Quinto argomento: gli abbandoni dell'intero run, non della sessione.
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 3, 1, 10, 1));
+        var phase = new ExecutingPhase(coordinator);
+
+        var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.True(result.Stop);
+        Assert.Equal(RunPhase.CompletedWithErrors, result.NextPhase);
+        Assert.NotNull(result.Error);
+    }
+
+    [Fact]
+    public async Task Abandons_from_a_previous_session_still_count()
+    {
+        // Nessun abbandono in questa sessione, uno nel run: chiudere in
+        // Completed perderebbe l'informazione.
+        var coordinator = new StubCoordinator(new BatchExecutionResult(true, 5, 0, 40, 1));
+        var phase = new ExecutingPhase(coordinator);
+
+        var result = await phase.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(RunPhase.CompletedWithErrors, result.NextPhase);
+    }
+
     private static PurgeRun CreateRun(RetentionStrategy strategy = RetentionStrategy.Terminated) => new()
     {
         RunId = Guid.NewGuid(),

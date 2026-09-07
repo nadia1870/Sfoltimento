@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Engine;
@@ -142,6 +143,7 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
             db.Store,
             new IPurgePhase[] { transitionPhase, cancellationPhase },
             db.Services.GetRequiredService<PurgeStrategyResolver>(),
+            Options.Create(new PurgeOptions()), 
             NullLogger<RetentionOrchestrator>.Instance);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
@@ -252,6 +254,15 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
 
         public Task AbandonAsync(Guid runId, int batchNo, string? reason, CancellationToken ct) =>
             Task.CompletedTask;
+
+        /// <summary>
+        /// Nessuna slice abbandonata: questi test provano le transizioni di fase,
+        /// non gli esiti dell'esecuzione. Un valore diverso da zero manderebbe ogni
+        /// run in CompletedWithErrors e le assert sulle transizioni fallirebbero
+        /// per il motivo sbagliato.
+        /// </summary>
+        public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
+            Task.FromResult(0);
     }
 
 

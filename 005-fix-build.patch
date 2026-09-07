@@ -1,0 +1,406 @@
+diff --git a/CHANGELOG-V7.md b/CHANGELOG-V7.md
+index 9398e34..7f9b224 100644
+--- a/CHANGELOG-V7.md
++++ b/CHANGELOG-V7.md
+@@ -65,7 +65,9 @@ L'housekeeping trattava già i due casi in modo diverso, ma deducendolo da
+ 
+ Il conteggio degli abbandoni viene letto dal database, non dal contatore
+ dell'invocazione corrente: un run che abbandona una notte e completa quella dopo
+-chiuderebbe altrimenti come pulito.
++chiuderebbe altrimenti come pulito. La lettura passa da `IBatchWorkProvider`,
++così il coordinatore resta senza dipendenze dalla persistenza e `ExecutingPhase`
++resta verificabile senza database.
+ 
+ ## 6. Fasi terminali derivate dall'enum
+ 
+diff --git a/docs/decisioni.md b/docs/decisioni.md
+index 8dac410..fb8131b 100644
+--- a/docs/decisioni.md
++++ b/docs/decisioni.md
+@@ -155,5 +155,59 @@ due slice la prima notte, si ferma alla chiusura della finestra e completa il
+ resto la seconda, chiuderebbe con zero abbandoni e perderebbe l'informazione
+ proprio nel caso in cui serve.
+ 
+-**Conseguenza.** Una query in più per run, alla fine di `Executing`. Il contatore
+-in memoria resta valido per il log della singola sessione.
++**Dove sta il conteggio.** In `IBatchWorkProvider`, non in `ExecutingPhase`.
++Il primo tentativo dava alla fase una dipendenza da `PurgeRunStore`, e questo
++trasformava quattro test unitari in test che avevano bisogno di un database.
++`BatchExecutionCoordinatorContractTests` verifica per riflessione che il
++coordinatore non conosca `PurgeRunStore`: quel vincolo era già scritto, e la
++prima versione lo aggirava passando dalla fase.
++
++Il risultato porta quindi due numeri: `AbandonedSlices` per la sessione, che
++serve al log, e `AbandonedTotal` per il run, che decide la fase finale.
++
++**Conseguenza.** Una query in più per run, alla fine di `Executing`.
++
++---
++
++## D-7 — Contesa e guasto seguono due strade diverse
++
++**Decisione.** In `SliceExecutor` i `catch` sono quattro e l'ordine conta:
++
++1. `SqlException` di **concorrenza** (1205, 1222, -2) → `SliceResult.Retryable`.
++   La stessa slice si riprova fra qualche secondo.
++2. `OperationCanceledException` → rollback e rilancio. Finestra chiusa.
++3. `SqlException` **transitoria ma non di concorrenza** → rollback e **rilancio**.
++   Connessione caduta: il run si interrompe e resta riprendibile.
++4. Tutto il resto → `SliceResult.Fatal`. La slice viene abbandonata.
++
++**Perché il terzo `catch` deve esistere.** È il caso che si dimentica. La prima
++versione classificava con `IsTransient` al punto 1, quindi una connessione caduta
++faceva riprovare la slice fino a esaurire i tentativi e poi l'abbandonava.
++Correggere il punto 1 in `IsConcurrency` senza aggiungere il punto 3 è peggio: la
++`SqlException` cade nel `catch` generico e diventa `Fatal`, cioè viene
++abbandonata **subito**, senza nemmeno i tre tentativi.
++
++In entrambi i casi il risultato è lo stesso: aggregati lasciati a database in via
++definitiva, e un run chiuso in `CompletedWithErrors`, per un guasto che sarebbe
++passato da solo.
++
++**La catena.** Il rilancio funziona perché nessuno lo intercetta per strada:
++`BatchExecutionCoordinator` non ha `try`, `ExecutingPhase` nemmeno, e
++`RetentionOrchestrator` lo riconosce con `IsInfrastructure` e registra
++un'interruzione senza cambiare fase. Modificare uno qualsiasi di questi tre punti
++aggiungendo una cattura rompe la proprietà senza che nessun test attuale se ne
++accorga, tranne
++`BatchExecutionCoordinatorTests.Executor_exception_propagates_without_abandoning`.
++
++**Cosa non è ancora verificato.** La classificazione è coperta da
++`SqlErrorsTests`, la propagazione dal coordinatore in su dal test appena citato,
++e il comportamento dell'orchestratore da `RunLifecycleTests`. Manca l'anello
++`SliceExecutor` stesso: non è isolabile finché `SqlExecutor` resta una classe
++concreta. È la ragione principale per introdurre `ISqlExecutor`.
++
++**Proprietà utile scoperta strada facendo.** Se il guasto colpisce
++`tx.CommitAsync`, lo stato è ambiguo: il commit può essere passato o no. Non è un
++problema perché il checkpoint di slice sta **dentro** la transazione. Se il
++commit è passato, la slice risulta `Completed` e non viene ripresa; se non è
++passato, resta `Pending`. Le due possibilità portano allo stesso comportamento
++corretto senza bisogno di distinguerle.
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+index b90426c..9e8d0c7 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/BatchExecutionCoordinator.cs
+@@ -136,18 +136,33 @@ public sealed class BatchExecutionCoordinator(
+                 abandoned);
+         }
+ 
++        // Il totale viene riletto: il contatore locale vale solo per questa
++        // sessione, e un run che abbandona una notte e completa quella dopo
++        // risulterebbe pulito.
++        var abandonedTotal = await workProvider
++            .CountAbandonedAsync(run.RunId, ct).ConfigureAwait(false);
++
+         return BatchExecutionResult.CompletedRun(
+             completed,
+             abandoned,
+-            totalRows);
++            totalRows,
++            abandonedTotal);
+     }
+ }
+ 
++/// <summary>
++/// Esito dell'esecuzione dei batch.
++///
++/// AbandonedSlices conta questa sessione; AbandonedTotal conta il run. I due
++/// numeri divergono ogni volta che un run attraversa piu' finestre operative, e
++/// solo il secondo dice se il run sta lasciando aggregati a database.
++/// </summary>
+ public sealed record BatchExecutionResult(
+     bool Completed,
+     int CompletedSlices,
+     int AbandonedSlices,
+-    long RowsDeleted)
++    long RowsDeleted,
++    int AbandonedTotal = 0)
+ {
+     public static BatchExecutionResult WindowClosed(
+         int completedSlices,
+@@ -158,6 +173,7 @@ public sealed record BatchExecutionResult(
+     public static BatchExecutionResult CompletedRun(
+         int completedSlices,
+         int abandonedSlices,
+-        long rowsDeleted) =>
+-        new(true, completedSlices, abandonedSlices, rowsDeleted);
++        long rowsDeleted,
++        int abandonedTotal) =>
++        new(true, completedSlices, abandonedSlices, rowsDeleted, abandonedTotal);
+ }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/IBatchWorkProvider.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/IBatchWorkProvider.cs
+index e315e05..b26cbea 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/IBatchWorkProvider.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/IBatchWorkProvider.cs
+@@ -17,4 +17,13 @@ public interface IBatchWorkProvider
+         int batchNo,
+         string? reason,
+         CancellationToken ct);
++
++    /// <summary>
++    /// Slice abbandonate del run, tutte, non solo quelle di questa sessione.
++    ///
++    /// Sta qui e non su PurgeRunStore perche' il coordinatore deve poter
++    /// rispondere senza conoscere la persistenza: e' il contratto che
++    /// BatchExecutionCoordinatorContractTests verifica per riflessione.
++    /// </summary>
++    Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct);
+ }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/PurgeRunBatchWorkProvider.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/PurgeRunBatchWorkProvider.cs
+index 1953a55..a7ebf42 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/PurgeRunBatchWorkProvider.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchExecution/PurgeRunBatchWorkProvider.cs
+@@ -20,4 +20,7 @@ public sealed class PurgeRunBatchWorkProvider(PurgeRunStore store) : IBatchWorkP
+         string? reason,
+         CancellationToken ct) =>
+         store.AbandonSliceAsync(runId, batchNo, reason, ct);
++
++    public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
++        store.CountAbandonedSlicesAsync(runId, ct);
+ }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs b/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
+index 5c52ab0..ea36dab 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/Phases/ExecutingPhase.cs
+@@ -4,8 +4,7 @@ using OSM.PaymentOrder.Purge.Engine.BatchExecution;
+ namespace OSM.PaymentOrder.Purge.Engine.Phases;
+ 
+ public sealed class ExecutingPhase(
+-    IBatchExecutionCoordinator coordinator,
+-    PurgeRunStore store) : IPurgePhase
++    IBatchExecutionCoordinator coordinator) : IPurgePhase
+ {
+     private static readonly IReadOnlySet<RunPhase> Supported =
+         new HashSet<RunPhase> { RunPhase.Executing };
+@@ -22,16 +21,13 @@ public sealed class ExecutingPhase(
+         if (!result.Completed)
+             return PhaseResult.Stay();
+ 
+-        // Il conteggio arriva dal database, non da result.AbandonedSlices.
+-        // Quel contatore vale solo per l'invocazione corrente: un run che
+-        // abbandona due slice la prima notte e ne completa il resto la seconda
+-        // chiuderebbe con zero abbandoni e perderebbe l'informazione.
+-        var abandoned = await store.CountAbandonedSlicesAsync(run.RunId, ct).ConfigureAwait(false);
+-
+-        return abandoned == 0
++        // AbandonedTotal, non AbandonedSlices: il secondo conta solo questa
++        // sessione, e un run che abbandona una notte e completa quella dopo
++        // chiuderebbe come pulito.
++        return result.AbandonedTotal == 0
+             ? PhaseResult.Complete()
+             : PhaseResult.CompleteWithErrors(
+-                $"{abandoned} slice abbandonate: gli aggregati corrispondenti non sono " +
+-                "stati cancellati e restano a database.");
++                $"{result.AbandonedTotal} slice abbandonate: gli aggregati " +
++                "corrispondenti non sono stati cancellati e restano a database.");
+     }
+ }
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/SliceExecutor.cs b/src/OSM.PaymentOrder.Purge/Engine/SliceExecutor.cs
+index 79ead9f..3c208be 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/SliceExecutor.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/SliceExecutor.cs
+@@ -134,7 +134,11 @@ public sealed class SliceExecutor(
+ 
+             return SliceResult.Ok(totalRows);
+         }
+-        catch (SqlException ex) when (SqlErrors.IsTransient(ex))
++        // IsConcurrency, non IsTransient: qui si decide se riprovare *questa
++        // slice*. Un deadlock si risolve riprovando la stessa slice fra qualche
++        // secondo; una connessione caduta no. I due casi sono separati, e il
++        // secondo e' gestito dal catch piu' sotto.
++        catch (SqlException ex) when (SqlErrors.IsConcurrency(ex))
+         {
+             await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
+             log.LogWarning(ex, "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Sql={Number}",
+@@ -146,6 +150,30 @@ public sealed class SliceExecutor(
+             await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
+             throw;
+         }
++        catch (SqlException ex) when (SqlErrors.IsTransient(ex))
++        {
++            // Transitorio ma non di concorrenza: connessione caduta, rifiutata
++            // o azzerata. Non e' un problema di questa slice e non si risolve
++            // riprovandola.
++            //
++            // Questo catch deve esistere, e deve stare dopo quello sulla
++            // concorrenza. Senza, l'eccezione finirebbe nel catch generico e
++            // diventerebbe Fatal, che il coordinatore traduce in AbandonAsync:
++            // un guasto di rete lascerebbe aggregati a database in via
++            // definitiva, senza nemmeno consumare i tentativi previsti.
++            //
++            // Rilanciando, risale al coordinatore, che non cattura, e da li'
++            // all'orchestratore, che la riconosce come guasto e lascia il run
++            // riprendibile dal checkpoint.
++            await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
++
++            log.LogWarning(ex,
++                "PurgeSliceInterrupted RunId={RunId} BatchNo={BatchNo} Sql={Number} — " +
++                "guasto di connessione, il run resta riprendibile",
++                run.RunId, slice.BatchNo, ex.Number);
++
++            throw;
++        }
+         catch (Exception ex)
+         {
+             await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/SqlErrors.cs b/src/OSM.PaymentOrder.Purge/Engine/SqlErrors.cs
+index dbdaac7..c221631 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/SqlErrors.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/SqlErrors.cs
+@@ -45,13 +45,25 @@ public static class SqlErrors
+         49918, 49919, 49920     // nessuna risorsa per elaborare la richiesta
+     ];
+ 
+-    public static bool IsTransient(SqlException ex) =>
+-        Concurrency.Contains(ex.Number) || Connection.Contains(ex.Number);
++    /// <summary>
++    /// Guasto passeggero di qualunque natura: il run resta riprendibile.
++    /// Serve all'orchestratore, che decide sul run intero.
++    /// </summary>
++    public static bool IsTransient(SqlException ex) => IsTransient(ex.Number);
++
++    public static bool IsTransient(int number) =>
++        Concurrency.Contains(number) || Connection.Contains(number);
+ 
+     /// <summary>
+-    /// Un deadlock o un timeout di lock: la slice puo' riprovare subito.
+-    /// Distinta da IsTransient perche' un guasto di connessione non si risolve
+-    /// con un ritardo di cinque secondi, mentre una contesa si.
++    /// Contesa con l'operativita': la slice puo' riprovare fra qualche secondo.
++    ///
++    /// Distinta da IsTransient perche' le due decisioni sono diverse. Una
++    /// contesa si risolve riprovando la stessa slice; una connessione caduta
++    /// no, e riprovarla brucia i tentativi disponibili fino ad abbandonare la
++    /// slice. Un'interruzione di rete diventerebbe cosi' un aggregato lasciato
++    /// a database in via definitiva, invece di un run da riprendere.
+     /// </summary>
+-    public static bool IsConcurrency(SqlException ex) => Concurrency.Contains(ex.Number);
++    public static bool IsConcurrency(SqlException ex) => IsConcurrency(ex.Number);
++
++    public static bool IsConcurrency(int number) => Concurrency.Contains(number);
+ }
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/BatchExecutionCoordinatorTests.cs b/tests/OSM.PaymentOrder.Purge.Tests/BatchExecutionCoordinatorTests.cs
+index 74ed3f5..30b9c02 100644
+--- a/tests/OSM.PaymentOrder.Purge.Tests/BatchExecutionCoordinatorTests.cs
++++ b/tests/OSM.PaymentOrder.Purge.Tests/BatchExecutionCoordinatorTests.cs
+@@ -226,6 +226,31 @@ public sealed class BatchExecutionCoordinatorTests
+         IsOversized = false
+     };
+ 
++    /// <summary>
++    /// Un'eccezione dell'esecutore deve attraversare il coordinatore senza
++    /// essere tradotta in un abbandono.
++    ///
++    /// E' l'anello centrale della catena che porta un guasto di connessione
++    /// dalla slice all'orchestratore. Se il coordinatore la catturasse, o se
++    /// SliceExecutor la trasformasse in Fatal, la slice verrebbe abbandonata e
++    /// il run chiuderebbe in CompletedWithErrors: gli aggregati resterebbero a
++    /// database in via definitiva per un guasto passeggero.
++    /// </summary>
++    [Fact]
++    public async Task Executor_exception_propagates_without_abandoning()
++    {
++        var guasto = new TimeoutException("connessione caduta");
++        var workProvider = new FakeWorkProvider(Slice(1, 0), Slice(2, 0));
++        var coordinator = CreateSut(workProvider, FakeExecutor.Throwing(guasto));
++
++        var sollevata = await Assert.ThrowsAsync<TimeoutException>(
++            () => coordinator.ExecuteAsync(CreateRun(), CancellationToken.None));
++
++        Assert.Same(guasto, sollevata);
++        Assert.Empty(workProvider.Abandoned);
++        Assert.Empty(workProvider.RecordedAttempts);
++    }
++
+     private sealed class FakeWorkProvider(params SliceInfo[] slices) : IBatchWorkProvider
+     {
+         private readonly Queue<SliceInfo> _slices = new(slices);
+@@ -266,6 +291,19 @@ public sealed class BatchExecutionCoordinatorTests
+             Abandoned.Add((batchNo, reason ?? string.Empty));
+             return Task.CompletedTask;
+         }
++
++        /// <summary>
++        /// Deliberatamente non restituisce zero: il fake modella lo store, che
++        /// conta le slice abbandonate del run. PreviousSessionAbandoned simula
++        /// quelle lasciate da una finestra operativa precedente.
++        /// </summary>
++        public int PreviousSessionAbandoned { get; init; }
++
++        public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct)
++        {
++            ct.ThrowIfCancellationRequested();
++            return Task.FromResult(Abandoned.Count + PreviousSessionAbandoned);
++        }
+     }
+ 
+     private sealed class FakeExecutor : IBatchExecutor
+@@ -277,6 +315,14 @@ public sealed class BatchExecutionCoordinatorTests
+ 
+         public FakeExecutor(Func<PurgeRun, SliceInfo, SliceResult> onExecute) => _onExecute = onExecute;
+ 
++        /// <summary>
++        /// Solleva invece di restituire un esito. Serve a verificare che il
++        /// coordinatore non converta un'eccezione in un abbandono: un guasto
++        /// di connessione deve risalire, non lasciare aggregati a database.
++        /// </summary>
++        public static FakeExecutor Throwing(Exception ex) =>
++            new((_, _) => throw ex);
++
+         public List<int> ExecutedBatches { get; } = [];
+ 
+         public Task<SliceResult> ExecuteAsync(PurgeRun run, SliceInfo slice, CancellationToken ct)
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/SqlErrorsTests.cs b/tests/OSM.PaymentOrder.Purge.Tests/SqlErrorsTests.cs
+new file mode 100644
+index 0000000..b1d2628
+--- /dev/null
++++ b/tests/OSM.PaymentOrder.Purge.Tests/SqlErrorsTests.cs
+@@ -0,0 +1,47 @@
++using OSM.PaymentOrder.Purge.Engine;
++using Xunit;
++
++namespace OSM.PaymentOrder.Purge.Tests;
++
++/// <summary>
++/// La differenza fra contesa e guasto decide due cose diverse: se riprovare la
++/// slice, e se il run resta riprendibile. Confonderle costa in entrambi i versi,
++/// e la prima versione le confondeva.
++/// </summary>
++public sealed class SqlErrorsTests
++{
++    [Theory]
++    [InlineData(1205)]  // deadlock
++    [InlineData(1222)]  // lock request timeout
++    [InlineData(-2)]    // command timeout
++    public void Concurrency_errors_retry_the_slice(int number)
++    {
++        Assert.True(SqlErrors.IsConcurrency(number));
++        Assert.True(SqlErrors.IsTransient(number));
++    }
++
++    /// <summary>
++    /// Una connessione caduta non deve far riprovare la slice: i tentativi si
++    /// esaurirebbero e la slice verrebbe abbandonata, lasciando aggregati a
++    /// database per un guasto che sarebbe passato da solo.
++    /// </summary>
++    [Theory]
++    [InlineData(233)]    // connessione chiusa dal server
++    [InlineData(10054)]  // connessione azzerata dal peer
++    [InlineData(40613)]  // database non disponibile
++    public void Connection_errors_interrupt_the_run_instead(int number)
++    {
++        Assert.False(SqlErrors.IsConcurrency(number));
++        Assert.True(SqlErrors.IsTransient(number));
++    }
++
++    [Theory]
++    [InlineData(547)]    // violazione di vincolo: e' un difetto
++    [InlineData(2627)]   // chiave duplicata
++    [InlineData(8134)]   // divisione per zero
++    public void Logical_errors_are_neither(int number)
++    {
++        Assert.False(SqlErrors.IsConcurrency(number));
++        Assert.False(SqlErrors.IsTransient(number));
++    }
++}

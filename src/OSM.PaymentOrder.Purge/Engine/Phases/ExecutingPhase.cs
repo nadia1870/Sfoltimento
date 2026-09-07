@@ -18,8 +18,16 @@ public sealed class ExecutingPhase(
 
         // Completed = false significa finestra chiusa o lavoro sospeso: la fase
         // resta la stessa e il run riprendera' dal checkpoint.
-        return result.Completed
+        if (!result.Completed)
+            return PhaseResult.Stay();
+
+        // AbandonedTotal, non AbandonedSlices: il secondo conta solo questa
+        // sessione, e un run che abbandona una notte e completa quella dopo
+        // chiuderebbe come pulito.
+        return result.AbandonedTotal == 0
             ? PhaseResult.Complete()
-            : PhaseResult.Stay();
+            : PhaseResult.CompleteWithErrors(
+                $"{result.AbandonedTotal} slice abbandonate: gli aggregati " +
+                "corrispondenti non sono stati cancellati e restano a database.");
     }
 }
