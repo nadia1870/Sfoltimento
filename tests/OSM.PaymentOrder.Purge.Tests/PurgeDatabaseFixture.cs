@@ -84,7 +84,8 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton(TimeProvider.System);
         services.AddMetrics();
         services.AddSingleton<PurgeMetrics>();
-        services.AddSingleton(new SqlExecutor(ConnectionString));
+        services.AddSingleton(Sql);
+        services.AddSingleton<ISqlExecutor>(Sql);
 
         services.AddOptions<PurgeOptions>().Configure(o =>
         {

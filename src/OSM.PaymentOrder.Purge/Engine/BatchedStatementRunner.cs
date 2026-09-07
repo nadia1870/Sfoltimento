@@ -19,7 +19,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// la riesecuzione completa, perche' gli statement sono idempotenti.
 /// </summary>
 public sealed class BatchedStatementRunner(
-    SqlExecutor sql,
+    ISqlExecutor sql,
     IOptions<PurgeOptions> options,
     ILogger<BatchedStatementRunner> log)
 {

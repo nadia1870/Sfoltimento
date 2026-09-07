@@ -1,0 +1,398 @@
+diff --git a/src/OSM.PaymentOrder.Purge.Host/Program.cs b/src/OSM.PaymentOrder.Purge.Host/Program.cs
+index 739c957..d28b07f 100644
+--- a/src/OSM.PaymentOrder.Purge.Host/Program.cs
++++ b/src/OSM.PaymentOrder.Purge.Host/Program.cs
+@@ -93,6 +93,13 @@ public static class Program
+         builder.Services.AddSingleton(sp => new SqlExecutor(
+             cs, sp.GetRequiredService<IOptions<PurgeOptions>>().Value.CommandTimeoutSeconds));
+ 
++        // Registrata anche sotto ISqlExecutor, e con Resolve invece di una
++        // seconda istanza: PurgeExecutionLock e SliceExecutor usano ancora il
++        // tipo concreto, e due SqlExecutor distinti sarebbero due configurazioni
++        // che possono divergere.
++        builder.Services.AddSingleton<ISqlExecutor>(
++            sp => sp.GetRequiredService<SqlExecutor>());
++
+         builder.Services.AddSingleton<SchemaVerifier>();
+         builder.Services.AddSingleton<PurgeHousekeeping>();
+         builder.Services.AddSingleton<PurgeRunStore>();
+diff --git a/src/OSM.PaymentOrder.Purge/Data/IPurgeSession.cs b/src/OSM.PaymentOrder.Purge/Data/IPurgeSession.cs
+new file mode 100644
+index 0000000..7affbbc
+--- /dev/null
++++ b/src/OSM.PaymentOrder.Purge/Data/IPurgeSession.cs
+@@ -0,0 +1,83 @@
++using System.Data;
++
++namespace OSM.PaymentOrder.Purge.Data;
++
++/// <summary>
++/// Il confine transazionale di una slice.
++///
++/// Non e' "ISqlExecutor con una transazione": e' una responsabilita' diversa.
++/// ISqlExecutor rappresenta l'accesso SQL senza stato, uno statement per
++/// connessione. IPurgeSession rappresenta l'unita' atomica su cui si regge
++/// l'invariante del motore — un ordine non e' mai parzialmente cancellato — e
++/// nel codice quel confine esisteva gia', dentro SliceExecutor, senza avere un
++/// nome.
++///
++/// Dargli un nome serve a poterlo provare. SliceExecutor e' la classe piu'
++/// critica del motore, e finche' lavorava su SqlConnection e SqlTransaction
++/// concreti era l'unica non verificabile in isolamento: la sequenza degli
++/// statement, la guardia sui collettivi, la rivalidazione del rowcount, i
++/// quattro catch di D-7 si potevano osservare solo attraverso un run completo.
++///
++/// La superficie e' volutamente stretta: quattro metodi, esattamente cio' che
++/// SliceExecutor usa. Due divieti espliciti, perche' sono le due direzioni in
++/// cui questa interfaccia degenererebbe:
++///
++///   - Non esporre SqlConnection, SqlTransaction o SqlCommand. Un'interfaccia
++///     che restituisce oggetti ADO sposta il problema senza risolverlo:
++///     l'astrazione esprime operazioni, non oggetti.
++///
++///   - Non aggiungere ExecuteWithRetryAsync o simili. Il retry appartiene a
++///     BatchExecutionCoordinator, e quel confine — SliceExecutor esegue una
++///     volta sola, il coordinatore decide se riprovare — e' uno dei risultati
++///     migliori del refactoring. Un metodo comodo qui lo cancellerebbe.
++///
++/// La sessione arriva con DEADLOCK_PRIORITY LOW gia' impostata e la transazione
++/// aperta: sono politica del purge, non scelte del chiamante.
++/// </summary>
++public interface IPurgeSession : IAsyncDisposable
++{
++    Task<int> ExecuteAsync(string sql, CancellationToken ct, params SqlParam[] parameters);
++
++    Task<T?> ScalarAsync<T>(string sql, CancellationToken ct, params SqlParam[] parameters);
++
++    Task CommitAsync(CancellationToken ct);
++
++    /// <summary>
++    /// Annulla la transazione. Chiamarla piu' volte, o dopo il commit, non ha
++    /// effetto: i percorsi di errore di SliceExecutor si sovrappongono e non
++    /// devono doversi coordinare.
++    /// </summary>
++    Task RollbackAsync(CancellationToken ct);
++
++    // Invariante della liberazione, che vale per ogni implementazione:
++    //
++    //     dopo DisposeAsync, la transazione e' committata oppure annullata,
++    //     mai ancora attiva.
++    //
++    // Formulato cosi' e non come "Dispose annulla se non committata", perche'
++    // e' la garanzia che conta ed e' l'unica verificabile. Se il rollback in
++    // liberazione fallisce — connessione gia' caduta — l'invariante regge
++    // ugualmente: la transazione muore con la connessione.
++}
++
++/// <summary>
++/// Accesso al database. I primi tre metodi aprono e chiudono una connessione
++/// per statement; BeginSessionAsync restituisce invece una connessione con
++/// transazione, per il lavoro che deve essere atomico.
++///
++/// QueryAsync mappa da IDataRecord e non da SqlDataReader. E' la differenza fra
++/// un'interfaccia sostituibile e una decorativa: SqlDataReader non e'
++/// istanziabile in un test, IDataRecord si implementa in venti righe. Tutte le
++/// lambda esistenti continuano a compilare, perche' nessuna dichiara il tipo.
++/// </summary>
++public interface ISqlExecutor
++{
++    Task<int> ExecuteAsync(string sql, CancellationToken ct, params SqlParam[] parameters);
++
++    Task<T?> ScalarAsync<T>(string sql, CancellationToken ct, params SqlParam[] parameters);
++
++    Task<List<TRow>> QueryAsync<TRow>(string sql, Func<IDataRecord, TRow> map,
++                                      CancellationToken ct, params SqlParam[] parameters);
++
++    Task<IPurgeSession> BeginSessionAsync(CancellationToken ct);
++}
+diff --git a/src/OSM.PaymentOrder.Purge/Data/SqlExecutor.cs b/src/OSM.PaymentOrder.Purge/Data/SqlExecutor.cs
+index 67fb75d..dd9af29 100644
+--- a/src/OSM.PaymentOrder.Purge/Data/SqlExecutor.cs
++++ b/src/OSM.PaymentOrder.Purge/Data/SqlExecutor.cs
+@@ -23,6 +23,7 @@ public readonly record struct SqlParam(string Name, object? Value, SqlDbType? Ty
+ /// dell'applicazione (v10 §5).
+ /// </summary>
+ public sealed class SqlExecutor(string connectionString, int commandTimeoutSeconds = 300)
++    : ISqlExecutor
+ {
+     public string ConnectionString { get; } = connectionString;
+     public int CommandTimeoutSeconds { get; } = commandTimeoutSeconds;
+@@ -73,8 +74,12 @@ public sealed class SqlExecutor(string connectionString, int commandTimeoutSecon
+         return (T)Convert.ChangeType(value, typeof(T));
+     }
+ 
++    public async Task<IPurgeSession> BeginSessionAsync(CancellationToken ct) =>
++        await SqlSession.OpenAsync(ConnectionString, CommandTimeoutSeconds, ct)
++            .ConfigureAwait(false);
++
+     public async Task<List<TRow>> QueryAsync<TRow>(string sql,
+-        Func<SqlDataReader, TRow> map, CancellationToken ct, params SqlParam[] parameters)
++        Func<IDataRecord, TRow> map, CancellationToken ct, params SqlParam[] parameters)
+     {
+         var rows = new List<TRow>();
+         await using var conn = await OpenAsync(ct).ConfigureAwait(false);
+diff --git a/src/OSM.PaymentOrder.Purge/Data/SqlSession.cs b/src/OSM.PaymentOrder.Purge/Data/SqlSession.cs
+new file mode 100644
+index 0000000..4198413
+--- /dev/null
++++ b/src/OSM.PaymentOrder.Purge/Data/SqlSession.cs
+@@ -0,0 +1,127 @@
++using System.Data;
++using Microsoft.Data.SqlClient;
++
++namespace OSM.PaymentOrder.Purge.Data;
++
++/// <summary>
++/// Implementazione reale di <see cref="IPurgeSession"/> su ADO.
++///
++/// La transazione viene annullata alla liberazione se non e' stata committata.
++/// E' una rete di sicurezza, non il percorso previsto: SliceExecutor annulla
++/// esplicitamente nei propri catch, perche' vuole registrare a log un rollback
++/// fallito. Il flag evita che le due strade si pestino i piedi.
++/// </summary>
++internal sealed class SqlSession : IPurgeSession
++{
++    private readonly SqlConnection _conn;
++    private readonly SqlTransaction _tx;
++    private readonly int _timeoutSeconds;
++    private bool _closed;
++
++    private SqlSession(SqlConnection conn, SqlTransaction tx, int timeoutSeconds)
++    {
++        _conn = conn;
++        _tx = tx;
++        _timeoutSeconds = timeoutSeconds;
++    }
++
++    internal static async Task<IPurgeSession> OpenAsync(
++        string connectionString, int timeoutSeconds, CancellationToken ct)
++    {
++        var conn = new SqlConnection(connectionString);
++        SqlTransaction tx;
++
++        try
++        {
++            await conn.OpenAsync(ct).ConfigureAwait(false);
++
++            // In caso di deadlock con l'applicazione la vittima designata e' il
++            // purge, mai l'operativita'. Va impostata sulla sessione prima di
++            // aprire la transazione.
++            await using (var pri = conn.CreateCommand())
++            {
++                pri.CommandText = "SET DEADLOCK_PRIORITY LOW;";
++                pri.CommandTimeout = timeoutSeconds;
++                await pri.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
++            }
++
++            tx = (SqlTransaction)await conn
++                .BeginTransactionAsync(IsolationLevel.ReadCommitted, ct).ConfigureAwait(false);
++        }
++        catch
++        {
++            // Un guasto qui lascerebbe altrimenti la connessione nel pool in
++            // uno stato indefinito. L'eccezione prosegue: e' il chiamante a
++            // classificarla.
++            await conn.DisposeAsync().ConfigureAwait(false);
++            throw;
++        }
++
++        return new SqlSession(conn, tx, timeoutSeconds);
++    }
++
++    private SqlCommand Command(string sql, SqlParam[] parameters)
++    {
++        var cmd = _conn.CreateCommand();
++        cmd.CommandText = sql;
++        cmd.CommandTimeout = _timeoutSeconds;
++        cmd.Transaction = _tx;
++
++        foreach (var p in parameters)
++        {
++            if (p.Type is { } type)
++                cmd.Parameters.Add(p.Name, type).Value = p.Value ?? DBNull.Value;
++            else
++                cmd.Parameters.AddWithValue(p.Name, p.Value ?? DBNull.Value);
++        }
++
++        return cmd;
++    }
++
++    public async Task<int> ExecuteAsync(string sql, CancellationToken ct,
++                                        params SqlParam[] parameters)
++    {
++        await using var cmd = Command(sql, parameters);
++        return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
++    }
++
++    public async Task<T?> ScalarAsync<T>(string sql, CancellationToken ct,
++                                         params SqlParam[] parameters)
++    {
++        await using var cmd = Command(sql, parameters);
++        var value = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
++
++        if (value is null || value == DBNull.Value) return default;
++        if (value is T typed) return typed;
++        return (T)Convert.ChangeType(value, typeof(T));
++    }
++
++    public async Task CommitAsync(CancellationToken ct)
++    {
++        await _tx.CommitAsync(ct).ConfigureAwait(false);
++        _closed = true;
++    }
++
++    public async Task RollbackAsync(CancellationToken ct)
++    {
++        if (_closed) return;
++
++        // Il flag si alza prima: se il rollback fallisce, ritentarlo alla
++        // liberazione solleverebbe una seconda eccezione che coprirebbe la
++        // prima, che e' quella che interessa.
++        _closed = true;
++        await _tx.RollbackAsync(ct).ConfigureAwait(false);
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        if (!_closed)
++        {
++            try { await _tx.RollbackAsync().ConfigureAwait(false); }
++            catch { /* la connessione potrebbe essere gia' caduta */ }
++        }
++
++        await _tx.DisposeAsync().ConfigureAwait(false);
++        await _conn.DisposeAsync().ConfigureAwait(false);
++    }
++}
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchPlanner.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchPlanner.cs
+index faa7e5f..3b16add 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchPlanner.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchPlanner.cs
+@@ -15,6 +15,16 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// stesso BatchNo. In questo modo il SliceExecutor puo' cancellare l'intero
+ /// aggregato, compreso il Collective, in una sola transazione.
+ /// </summary>
++// Resta su SqlExecutor concreto, e non e' una dimenticanza.
++//
++// Il pianificatore ha bisogno della stessa connessione per piu' statement,
++// perche' la tabella temporanea #assignments vive sulla sessione. Ma non ha
++// bisogno di una transazione: avvolgerlo in una IPurgeSession terrebbe lock
++// sullo staging per l'intera pianificazione, che e' un cambio di comportamento
++// e non appartiene a una migrazione meccanica.
++//
++// E' una terza forma — connessione condivisa senza transazione — che le due
++// interfacce attuali non coprono. Va decisa a parte, non risolta di straforo.
+ public sealed class BatchPlanner(
+     SqlExecutor sql,
+     PurgeStrategyResolver strategyResolver,
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/BatchedStatementRunner.cs b/src/OSM.PaymentOrder.Purge/Engine/BatchedStatementRunner.cs
+index ba23801..2dbe7d0 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/BatchedStatementRunner.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/BatchedStatementRunner.cs
+@@ -19,7 +19,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// la riesecuzione completa, perche' gli statement sono idempotenti.
+ /// </summary>
+ public sealed class BatchedStatementRunner(
+-    SqlExecutor sql,
++    ISqlExecutor sql,
+     IOptions<PurgeOptions> options,
+     ILogger<BatchedStatementRunner> log)
+ {
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs b/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
+index 5ed17ae..ddb3425 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/DryRunReporter.cs
+@@ -10,7 +10,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// statement di delete: se il conteggio e' sbagliato, lo sarebbe anche la
+ /// cancellazione. Il dry-run verifica quindi anche le query, non solo i volumi.
+ /// </summary>
+-public sealed class DryRunReporter(SqlExecutor sql, ILogger<DryRunReporter> log)
++public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log)
+ {
+     public async Task<DryRunReport> ProduceAsync(PurgeRun run, CancellationToken ct)
+     {
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/PreDeleteValidator.cs b/src/OSM.PaymentOrder.Purge/Engine/PreDeleteValidator.cs
+index ce8f160..088167e 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/PreDeleteValidator.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/PreDeleteValidator.cs
+@@ -11,7 +11,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// sistematico non intercettato qui si tradurrebbe in abbandono di massa.
+ /// </summary>
+ public sealed class PreDeleteValidator(
+-    SqlExecutor sql,
++    ISqlExecutor sql,
+     PurgeStrategyResolver strategyResolver,
+     ILogger<PreDeleteValidator> log)
+ {
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/PurgeHousekeeping.cs b/src/OSM.PaymentOrder.Purge/Engine/PurgeHousekeeping.cs
+index e3f9359..794e77f 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/PurgeHousekeeping.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/PurgeHousekeeping.cs
+@@ -25,7 +25,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// Un solo log di riepilogo.
+ /// </summary>
+ public sealed class PurgeHousekeeping(
+-    SqlExecutor sql,
++    ISqlExecutor sql,
+     IOptions<PurgeOptions> options,
+     TimeProvider clock,
+     ILogger<PurgeHousekeeping> log)
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/PurgeRunStore.cs b/src/OSM.PaymentOrder.Purge/Engine/PurgeRunStore.cs
+index ea6bbf4..38e1da2 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/PurgeRunStore.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/PurgeRunStore.cs
+@@ -11,7 +11,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// dentro la transazione della slice, cosi' il progresso registrato non puo'
+ /// divergere dallo stato reale del database.
+ /// </summary>
+-public sealed class PurgeRunStore(SqlExecutor sql)
++public sealed class PurgeRunStore(ISqlExecutor sql)
+ {
+     public async Task<Guid> CreateAsync(RetentionStrategy strategy, PurgeOptions options,
+                                         DateTimeOffset reference, CancellationToken ct)
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs b/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
+index c84fb91..79fe469 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/PurgeStrategies.cs
+@@ -148,12 +148,12 @@ public sealed class StandingOrdersStrategy(BatchedStatementRunner batched, ILogg
+ /// rispetto a quella degli ordini.
+ /// </summary>
+ public sealed class CollectiveStrategy(
+-    SqlExecutor sql,
++    ISqlExecutor sql,
+     BatchedStatementRunner batched,
+     ILogger<CollectiveStrategy> log)
+     : PurgeStrategyBase(batched, log)
+ {
+-    private readonly SqlExecutor _sql = sql;
++    private readonly ISqlExecutor _sql = sql;
+     public override RetentionStrategy Type => RetentionStrategy.Collective;
+     // Il Collective viene eliminato nella stessa transazione dei suoi ordini componenti.
+     // La coda dell'aggregato collettivo e' inclusa negli statement della slice:
+diff --git a/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs b/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
+index 3370188..0e844ed 100644
+--- a/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
++++ b/src/OSM.PaymentOrder.Purge/Engine/SchemaVerifier.cs
+@@ -15,7 +15,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
+ /// Va invocato all'avvio: una divergenza fra il modello e il database non e'
+ /// una condizione da gestire, e' una condizione da segnalare prima di iniziare.
+ /// </summary>
+-public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
++public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log)
+ {
+     private const string Query = """
+         SELECT QUOTENAME(s.name) + '.' + QUOTENAME(t.name)
+diff --git a/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+index 36136a1..7d0da83 100644
+--- a/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
++++ b/tests/OSM.PaymentOrder.Purge.Tests/PurgeDatabaseFixture.cs
+@@ -84,7 +84,8 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
+         services.AddSingleton(TimeProvider.System);
+         services.AddMetrics();
+         services.AddSingleton<PurgeMetrics>();
+-        services.AddSingleton(new SqlExecutor(ConnectionString));
++        services.AddSingleton(Sql);
++        services.AddSingleton<ISqlExecutor>(Sql);
+ 
+         services.AddOptions<PurgeOptions>().Configure(o =>
+         {

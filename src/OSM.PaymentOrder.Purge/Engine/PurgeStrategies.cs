@@ -148,12 +148,12 @@ public sealed class StandingOrdersStrategy(BatchedStatementRunner batched, ILogg
 /// rispetto a quella degli ordini.
 /// </summary>
 public sealed class CollectiveStrategy(
-    SqlExecutor sql,
+    ISqlExecutor sql,
     BatchedStatementRunner batched,
     ILogger<CollectiveStrategy> log)
     : PurgeStrategyBase(batched, log)
 {
-    private readonly SqlExecutor _sql = sql;
+    private readonly ISqlExecutor _sql = sql;
     public override RetentionStrategy Type => RetentionStrategy.Collective;
     // Il Collective viene eliminato nella stessa transazione dei suoi ordini componenti.
     // La coda dell'aggregato collettivo e' inclusa negli statement della slice:

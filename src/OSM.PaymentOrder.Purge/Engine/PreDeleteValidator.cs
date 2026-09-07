@@ -11,7 +11,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// sistematico non intercettato qui si tradurrebbe in abbandono di massa.
 /// </summary>
 public sealed class PreDeleteValidator(
-    SqlExecutor sql,
+    ISqlExecutor sql,
     PurgeStrategyResolver strategyResolver,
     ILogger<PreDeleteValidator> log)
 {

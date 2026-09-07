@@ -11,7 +11,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// dentro la transazione della slice, cosi' il progresso registrato non puo'
 /// divergere dallo stato reale del database.
 /// </summary>
-public sealed class PurgeRunStore(SqlExecutor sql)
+public sealed class PurgeRunStore(ISqlExecutor sql)
 {
     public async Task<Guid> CreateAsync(RetentionStrategy strategy, PurgeOptions options,
                                         DateTimeOffset reference, CancellationToken ct)

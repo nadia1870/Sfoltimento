@@ -10,7 +10,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// statement di delete: se il conteggio e' sbagliato, lo sarebbe anche la
 /// cancellazione. Il dry-run verifica quindi anche le query, non solo i volumi.
 /// </summary>
-public sealed class DryRunReporter(SqlExecutor sql, ILogger<DryRunReporter> log)
+public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log)
 {
     public async Task<DryRunReport> ProduceAsync(PurgeRun run, CancellationToken ct)
     {
