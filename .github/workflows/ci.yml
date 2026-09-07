@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Test unitari
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      # Il filtro e' positivo, non "NOT Category=Unit": l'appartenenza di un
+      # test a un job e' una decisione esplicita. TestCategoryTests verifica
+      # che nessuna classe sfugga a entrambi i filtri, che sarebbe il modo
+      # peggiore di perdere copertura — silenzioso e con la pipeline verde.
+      - name: Test unitari
+        run: >
+          dotnet test
+          --no-build
+          --configuration Release
+          --filter "Category=Unit"
+          --logger "trx;LogFileName=unit.trx"
+          --results-directory artifacts
+
+      - name: Esito
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: risultati-unit
+          path: artifacts
+          if-no-files-found: ignore

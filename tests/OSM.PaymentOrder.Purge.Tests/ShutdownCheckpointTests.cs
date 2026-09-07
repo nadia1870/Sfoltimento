@@ -14,6 +14,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// tutta la ripresa direbbe il falso.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class ShutdownCheckpointTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

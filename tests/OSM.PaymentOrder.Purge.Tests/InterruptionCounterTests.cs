@@ -15,6 +15,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// completata durante Executing, che e' la fase lunga e non cambia mai fase.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class InterruptionCounterTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

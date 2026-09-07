@@ -13,6 +13,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// checkpoint, e che sparisca insieme alla transazione se la slice fallisce.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class AuditTrailTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

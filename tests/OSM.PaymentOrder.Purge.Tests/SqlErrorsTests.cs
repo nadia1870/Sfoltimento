@@ -8,6 +8,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// slice, e se il run resta riprendibile. Confonderle costa in entrambi i versi,
 /// e la prima versione le confondeva.
 /// </summary>
+[Trait("Category", "Unit")]
 public sealed class SqlErrorsTests
 {
     [Theory]

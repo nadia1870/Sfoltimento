@@ -18,6 +18,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// Trasversale a tutti i casi non riusciti: CommitAsync non deve essere
 /// chiamato nemmeno una volta.
 /// </summary>
+[Trait("Category", "Unit")]
 public sealed class SliceExecutorTests
 {
     private const string StatementOrder = "DELETE_ORDER";

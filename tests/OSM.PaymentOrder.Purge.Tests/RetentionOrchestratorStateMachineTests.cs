@@ -17,6 +17,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// persistenza della fase e successiva ripresa del run.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();
