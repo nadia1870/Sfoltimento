@@ -95,7 +95,13 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
                SET Phase = @Phase,
                    LastError = COALESCE(@Error, LastError),
                    CompletedOn = CASE WHEN @Phase IN ('Completed','CompletedWithErrors','Failed')
-                                      THEN SYSDATETIMEOFFSET() ELSE CompletedOn END
+                                      THEN SYSDATETIMEOFFSET() ELSE CompletedOn END,
+                   -- Un cambio di fase e' progresso: il run ha portato a
+                   -- termine qualcosa, e le interruzioni accumulate prima non
+                   -- dicono piu' niente. Sta nella stessa UPDATE perche' una
+                   -- seconda scrittura per la stessa informazione sarebbe un
+                   -- round-trip regalato.
+                   InterruptionCount = 0
              WHERE RunId = @RunId;
             """;
         return sql.ExecuteAsync(u, ct,
@@ -117,6 +123,23 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
 
         return rows.Count == 0 ? null : rows[0];
     }
+
+    /// <summary>
+    /// Azzera il contatore delle interruzioni.
+    ///
+    /// Serve per il progresso che non cambia fase, cioe' le slice completate
+    /// durante Executing: quella e' la fase lunga, e un run che macina slice
+    /// per ore senza transizioni non azzererebbe mai.
+    ///
+    /// Condizionata a un contatore diverso da zero, cosi' nel caso normale —
+    /// che e' la stragrande maggioranza — non scrive niente.
+    /// </summary>
+    public Task ResetInterruptionsAsync(Guid runId, CancellationToken ct) =>
+        sql.ExecuteAsync("""
+            UPDATE Purge.PurgeRun
+               SET InterruptionCount = 0
+             WHERE RunId = @RunId AND InterruptionCount > 0;
+            """, ct, SqlParam.Of("@RunId", runId));
 
     /// <summary>
     /// Registra un'interruzione da guasto senza toccare la fase.

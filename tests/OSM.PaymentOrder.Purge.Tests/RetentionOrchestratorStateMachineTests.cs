@@ -261,6 +261,9 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
         /// run in CompletedWithErrors e le assert sulle transizioni fallirebbero
         /// per il motivo sbagliato.
         /// </summary>
+        public Task ReportProgressAsync(Guid runId, CancellationToken ct) =>
+            Task.CompletedTask;
+
         public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
             Task.FromResult(0);
     }
