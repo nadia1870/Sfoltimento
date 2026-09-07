@@ -27,7 +27,15 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await ExecuteOnMasterAsync($"CREATE DATABASE [{DatabaseName}];");
+        // Collation dichiarata, non ereditata dal server.
+        //
+        // In locale il database nasce su LocalDB, in CI su un container: se la
+        // collation la decide il server, i confronti su StatusCode e sui nomi
+        // di tabella si comportano in due modi diversi nei due posti, e un
+        // test che passa sulla macchina di chi scrive fallisce in pipeline per
+        // una ragione che non ha niente a che vedere con il codice.
+        await ExecuteOnMasterAsync(
+            $"CREATE DATABASE [{DatabaseName}] COLLATE SQL_Latin1_General_CP1_CI_AS;");
         var builder = new SqlConnectionStringBuilder(MasterConnection) { InitialCatalog = DatabaseName };
         ConnectionString = builder.ConnectionString;
         Sql = new SqlExecutor(ConnectionString);
