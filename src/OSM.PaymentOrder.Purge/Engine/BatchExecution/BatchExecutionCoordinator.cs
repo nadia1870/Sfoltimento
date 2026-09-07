@@ -31,6 +31,7 @@ public sealed class BatchExecutionCoordinator(
         CancellationToken ct)
     {
         var completed = 0;
+        var progressoSegnalato = false;
         var abandoned = 0;
         long totalRows = 0;
 
@@ -79,6 +80,22 @@ public sealed class BatchExecutionCoordinator(
                 case SliceOutcome.Completed:
                     completed++;
                     totalRows += result.RowsDeleted;
+
+                    // Prima slice completata in questa sessione: il run ha
+                    // fatto progresso, quindi le interruzioni accumulate nelle
+                    // notti precedenti non contano piu'.
+                    //
+                    // Una volta sola, non a ogni slice: il contatore vive su
+                    // una riga condivisa di PurgeRun, e scriverla diecimila
+                    // volte per run sarebbe diecimila scritture per registrare
+                    // un'informazione che non cambia piu'.
+                    if (!progressoSegnalato)
+                    {
+                        progressoSegnalato = true;
+                        await workProvider.ReportProgressAsync(run.RunId, ct)
+                            .ConfigureAwait(false);
+                    }
+
                     break;
 
                 case SliceOutcome.Retryable

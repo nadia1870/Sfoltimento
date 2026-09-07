@@ -17,6 +17,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// persistenza della fase e successiva ripresa del run.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();
@@ -261,6 +262,9 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
         /// run in CompletedWithErrors e le assert sulle transizioni fallirebbero
         /// per il motivo sbagliato.
         /// </summary>
+        public Task ReportProgressAsync(Guid runId, CancellationToken ct) =>
+            Task.CompletedTask;
+
         public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
             Task.FromResult(0);
     }

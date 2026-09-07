@@ -19,6 +19,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// due run sulle stesse tabelle produrrebbero deadlock o doppie cancellazioni.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class AbandonedAndLockTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

@@ -15,6 +15,16 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// stesso BatchNo. In questo modo il SliceExecutor puo' cancellare l'intero
 /// aggregato, compreso il Collective, in una sola transazione.
 /// </summary>
+// Resta su SqlExecutor concreto, e non e' una dimenticanza.
+//
+// Il pianificatore ha bisogno della stessa connessione per piu' statement,
+// perche' la tabella temporanea #assignments vive sulla sessione. Ma non ha
+// bisogno di una transazione: avvolgerlo in una IPurgeSession terrebbe lock
+// sullo staging per l'intera pianificazione, che e' un cambio di comportamento
+// e non appartiene a una migrazione meccanica.
+//
+// E' una terza forma — connessione condivisa senza transazione — che le due
+// interfacce attuali non coprono. Va decisa a parte, non risolta di straforo.
 public sealed class BatchPlanner(
     SqlExecutor sql,
     PurgeStrategyResolver strategyResolver,

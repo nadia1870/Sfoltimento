@@ -15,7 +15,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// Va invocato all'avvio: una divergenza fra il modello e il database non e'
 /// una condizione da gestire, e' una condizione da segnalare prima di iniziare.
 /// </summary>
-public sealed class SchemaVerifier(SqlExecutor sql, ILogger<SchemaVerifier> log)
+public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log)
 {
     private const string Query = """
         SELECT QUOTENAME(s.name) + '.' + QUOTENAME(t.name)

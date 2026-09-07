@@ -17,6 +17,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// con implementazioni che sollevano l'eccezione voluta.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class RunLifecycleTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

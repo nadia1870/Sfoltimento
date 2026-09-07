@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  # Password del container di prova. Non e' un segreto: il container vive tre
+  # minuti, ascolta solo sulla rete del job e viene distrutto alla fine. Un
+  # secret qui darebbe l'impressione di proteggere qualcosa che non esiste,
+  # e renderebbe la pipeline impossibile da eseguire su un fork.
+  SA_PASSWORD: 'Purge-CI-2024!'
+
+jobs:
+  unit:
+    name: Test unitari
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      # Il filtro e' positivo, non "NOT Category=Unit": l'appartenenza di un
+      # test a un job e' una decisione esplicita. TestCategoryTests verifica
+      # che nessuna classe sfugga a entrambi i filtri, che sarebbe il modo
+      # peggiore di perdere copertura — silenzioso e con la pipeline verde.
+      - name: Test unitari
+        run: >
+          dotnet test
+          --no-build
+          --configuration Release
+          --filter "Category=Unit"
+          --logger "trx;LogFileName=unit.trx"
+          --results-directory artifacts
+
+      - name: Esito
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: risultati-unit
+          path: artifacts
+          if-no-files-found: ignore
+
+  integration:
+    name: Test di integrazione
+    runs-on: ubuntu-latest
+
+    # I test unitari girano in un secondo: se sono rossi, accendere un
+    # container SQL Server per scoprirlo di nuovo e' tempo sprecato.
+    needs: unit
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Purge-CI-2024!'
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # SQL Server apre la porta prima di essere pronto a servire query, quindi
+      # aspettare il TCP non basta: si aspetta che una SELECT risponda davvero.
+      - name: Attendere SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec "$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)" \
+                 /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" \
+                 -Q "SELECT 1" > /dev/null 2>&1; then
+              echo "SQL Server pronto dopo ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "SQL Server non e' diventato pronto in 60s"
+          docker logs "$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)" | tail -50
+          exit 1
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      # La fixture crea e distrugge un database dedicato per sessione, quindi
+      # la connessione punta a master. La collation la dichiara la fixture, non
+      # il server, cosi' il risultato non dipende da dove gira.
+      - name: Test di integrazione
+        env:
+          PURGE_TEST_SQL: >-
+            Server=localhost,1433;Database=master;User Id=sa;
+            Password=${{ env.SA_PASSWORD }};TrustServerCertificate=true
+        run: >
+          dotnet test
+          --no-build
+          --configuration Release
+          --filter "Category=Integration"
+          --logger "trx;LogFileName=integration.trx"
+          --results-directory artifacts
+
+      - name: Esito
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: risultati-integration
+          path: artifacts
+          if-no-files-found: ignore

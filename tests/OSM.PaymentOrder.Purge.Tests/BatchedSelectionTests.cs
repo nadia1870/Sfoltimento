@@ -13,6 +13,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// risultante coincida con quello che produrrebbe uno statement unico.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class BatchedSelectionTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

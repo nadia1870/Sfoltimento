@@ -93,6 +93,13 @@ public static class Program
         builder.Services.AddSingleton(sp => new SqlExecutor(
             cs, sp.GetRequiredService<IOptions<PurgeOptions>>().Value.CommandTimeoutSeconds));
 
+        // Registrata anche sotto ISqlExecutor, e con Resolve invece di una
+        // seconda istanza: PurgeExecutionLock e SliceExecutor usano ancora il
+        // tipo concreto, e due SqlExecutor distinti sarebbero due configurazioni
+        // che possono divergere.
+        builder.Services.AddSingleton<ISqlExecutor>(
+            sp => sp.GetRequiredService<SqlExecutor>());
+
         builder.Services.AddSingleton<SchemaVerifier>();
         builder.Services.AddSingleton<PurgeHousekeeping>();
         builder.Services.AddSingleton<PurgeRunStore>();

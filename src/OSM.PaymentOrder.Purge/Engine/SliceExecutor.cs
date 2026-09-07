@@ -1,4 +1,3 @@
-using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using OSM.PaymentOrder.Purge.Data;
@@ -15,7 +14,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// committa integralmente, o il rollback la riporta allo stato iniziale.
 /// </summary>
 public sealed class SliceExecutor(
-    SqlExecutor sql,
+    ISqlExecutor sql,
     PurgeStrategyResolver strategyResolver,
     PurgeMetrics metrics,
     ILogger<SliceExecutor> log)
@@ -26,27 +25,20 @@ public sealed class SliceExecutor(
         var started = DateTimeOffset.UtcNow;
         var strategy = strategyResolver.Resolve(run.Strategy);
 
-        // L'apertura della connessione sta dentro il try.
+        // L'apertura della sessione sta dentro il try.
         //
         // Stava fuori, e una connessione che non si apre e' esattamente cio'
         // che accade quando la rete ha un singhiozzo alle due di notte:
-        // l'eccezione scavalcava i catch, risaliva fino all'orchestratore e
-        // chiudeva il run. Un guasto di trenta secondi buttava ore di lavoro.
-        // Qui diventa una slice da riprovare, che e' quello che e'.
-        SqlConnection? conn = null;
-        SqlTransaction? tx = null;
+        // l'eccezione scavalcava i catch e risaliva senza essere classificata.
+        // Qui passa dai quattro catch come qualunque altro guasto.
+        //
+        // La sessione arriva con DEADLOCK_PRIORITY LOW e la transazione gia'
+        // aperta: sono politica del purge e vivono nell'implementazione.
+        IPurgeSession? session = null;
 
         try
         {
-            conn = await sql.OpenAsync(ct).ConfigureAwait(false);
-
-            // In caso di deadlock con l'applicazione la vittima designata e' il
-            // purge, mai l'operativita'.
-            await using (var pri = sql.Command(conn, null, "SET DEADLOCK_PRIORITY LOW;"))
-                await pri.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-            tx = (SqlTransaction)await conn
-                .BeginTransactionAsync(IsolationLevel.ReadCommitted, ct).ConfigureAwait(false);
+            session = await sql.BeginSessionAsync(ct).ConfigureAwait(false);
 
             var totalRows = 0;
             var orderRows = 0;
@@ -58,15 +50,17 @@ public sealed class SliceExecutor(
 
             if (strategy.Type == RetentionStrategy.Collective)
             {
-                await using var guard = sql.Command(conn, tx, RetentionSql.ValidateCollectiveBatchIntegrity,
+                // ScalarAsync<int> invece di Convert.ToInt32 su un object:
+                // il contratto su NULL diventa dichiarato (zero) invece di
+                // dipendere dal comportamento di Convert.
+                var invalidCollectives = await session.ScalarAsync<int>(
+                    RetentionSql.ValidateCollectiveBatchIntegrity, ct,
                     SqlParam.Of("@RunId", run.RunId),
-                    SqlParam.Of("@BatchNo", slice.BatchNo));
-                var invalidCollectives = Convert.ToInt32(
-                    await guard.ExecuteScalarAsync(ct).ConfigureAwait(false));
+                    SqlParam.Of("@BatchNo", slice.BatchNo)).ConfigureAwait(false);
 
                 if (invalidCollectives > 0)
                 {
-                    await tx.RollbackAsync(ct).ConfigureAwait(false);
+                    await session.RollbackAsync(ct).ConfigureAwait(false);
                     log.LogWarning(
                         "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} " +
                         "Motivo=CollectiveNonAtomico CollettiviInvalidi={Count}",
@@ -81,11 +75,9 @@ public sealed class SliceExecutor(
             {
                 ct.ThrowIfCancellationRequested();
 
-                await using var cmd = sql.Command(conn, tx, statement,
+                var affected = await session.ExecuteAsync(statement, ct,
                     SqlParam.Of("@RunId", run.RunId),
-                    SqlParam.Of("@BatchNo", slice.BatchNo));
-
-                var affected = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    SqlParam.Of("@BatchNo", slice.BatchNo)).ConfigureAwait(false);
                 totalRows += affected;
                 if (table == "Order") orderRows = affected;
 
@@ -103,7 +95,7 @@ public sealed class SliceExecutor(
             // dettagli, che e' molto peggio del non fare nulla.
             if (strategy.PlanningMode != PurgePlanningMode.OrphanHistory && orderRows != slice.OrderCount)
             {
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                await session.RollbackAsync(ct).ConfigureAwait(false);
                 log.LogWarning(
                     "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Atteso={Expected} " +
                     "Cancellato={Actual} Motivo=StatoOrdineCambiato",
@@ -112,16 +104,15 @@ public sealed class SliceExecutor(
             }
 
             if (auditLines.Count > 0)
-                await WriteAuditAsync(conn, tx, run.RunId, slice.BatchNo, auditLines, ct)
+                await WriteAuditAsync(session, run.RunId, slice.BatchNo, auditLines, ct)
                     .ConfigureAwait(false);
 
-            await using (var chk = sql.Command(conn, tx, RetentionSql.CheckpointSlice,
-                            SqlParam.Of("@RunId", run.RunId),
-                            SqlParam.Of("@BatchNo", slice.BatchNo),
-                            SqlParam.Of("@RowsDeleted", totalRows)))
-                await chk.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            await session.ExecuteAsync(RetentionSql.CheckpointSlice, ct,
+                SqlParam.Of("@RunId", run.RunId),
+                SqlParam.Of("@BatchNo", slice.BatchNo),
+                SqlParam.Of("@RowsDeleted", totalRows)).ConfigureAwait(false);
 
-            await tx.CommitAsync(ct).ConfigureAwait(false);
+            await session.CommitAsync(ct).ConfigureAwait(false);
 
             var elapsed = DateTimeOffset.UtcNow - started;
             metrics.SliceCompleted(elapsed, totalRows, run.Strategy.ToString());
@@ -140,14 +131,14 @@ public sealed class SliceExecutor(
         // secondo e' gestito dal catch piu' sotto.
         catch (SqlException ex) when (SqlErrors.IsConcurrency(ex))
         {
-            await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
+            await SafeRollbackAsync(session, ct).ConfigureAwait(false);
             log.LogWarning(ex, "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Sql={Number}",
                 run.RunId, slice.BatchNo, ex.Number);
             return SliceResult.Retryable($"Sql{ex.Number}");
         }
         catch (OperationCanceledException)
         {
-            await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
+            await SafeRollbackAsync(session, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
         catch (SqlException ex) when (SqlErrors.IsTransient(ex))
@@ -165,7 +156,7 @@ public sealed class SliceExecutor(
             // Rilanciando, risale al coordinatore, che non cattura, e da li'
             // all'orchestratore, che la riconosce come guasto e lascia il run
             // riprendibile dal checkpoint.
-            await SafeRollbackAsync(tx, CancellationToken.None).ConfigureAwait(false);
+            await SafeRollbackAsync(session, CancellationToken.None).ConfigureAwait(false);
 
             log.LogWarning(ex,
                 "PurgeSliceInterrupted RunId={RunId} BatchNo={BatchNo} Sql={Number} — " +
@@ -176,23 +167,29 @@ public sealed class SliceExecutor(
         }
         catch (Exception ex)
         {
-            await SafeRollbackAsync(tx, ct).ConfigureAwait(false);
+            await SafeRollbackAsync(session, ct).ConfigureAwait(false);
             log.LogError(ex, "PurgeSliceAbandoned RunId={RunId} BatchNo={BatchNo}",
                 run.RunId, slice.BatchNo);
             return SliceResult.Fatal(ex.Message);
         }
         finally
         {
-            // Con conn e tx dichiarate fuori dal try la liberazione non e' piu'
-            // affidata a un await using: va fatta qui, e in quest'ordine.
-            if (tx is not null) await tx.DisposeAsync().ConfigureAwait(false);
-            if (conn is not null) await conn.DisposeAsync().ConfigureAwait(false);
+            // La sessione nasce dentro il try, quindi niente await using: la
+            // liberazione va fatta qui. Vale l'invariante di IPurgeSession —
+            // dopo Dispose la transazione e' committata o annullata, mai ancora
+            // attiva — che copre i percorsi che i catch non prevedono.
+            if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
         }
     }
 
-    private async Task WriteAuditAsync(
-        SqlConnection conn,
-        SqlTransaction tx,
+    /// <summary>
+    /// Resta un metodo privato di SliceExecutor e non diventa un metodo di
+    /// IPurgeSession: l'audit e' logica di dominio del purge, e l'interfaccia
+    /// deve restare la superficie stretta che e'. Il chiamante non tocca piu'
+    /// connessione ne' transazione grazie all'astrazione, non grazie a questo.
+    /// </summary>
+    private static async Task WriteAuditAsync(
+        IPurgeSession session,
         Guid runId,
         int batchNo,
         IReadOnlyList<(string Table, int Rows)> lines,
@@ -208,17 +205,22 @@ public sealed class SliceExecutor(
             parameters[3 + i * 2] = SqlParam.Of($"@R{i}", (long)lines[i].Rows);
         }
 
-        await using var cmd = sql.Command(
-            conn, tx, RetentionSql.InsertSliceAudit(lines.Count), parameters);
-
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await session.ExecuteAsync(
+            RetentionSql.InsertSliceAudit(lines.Count), ct, parameters).ConfigureAwait(false);
     }
 
-    private async Task SafeRollbackAsync(SqlTransaction? tx, CancellationToken ct)
+    /// <summary>
+    /// Il rollback nei catch e' esplicito e non delegato alla liberazione,
+    /// perche' qui non e' pulizia: e' parte osservabile del percorso d'errore.
+    /// Se fallisce, quella riga di log e' l'unico posto in cui la cosa compare.
+    /// La rete di sicurezza in DisposeAsync copre un percorso diverso, non
+    /// previsto, e il flag interno impedisce il doppio rollback.
+    /// </summary>
+    private async Task SafeRollbackAsync(IPurgeSession? session, CancellationToken ct)
     {
-        if (tx is null) return;   // il guasto e' avvenuto prima di aprirla
+        if (session is null) return;   // il guasto e' avvenuto prima di aprirla
 
-        try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
+        try { await session.RollbackAsync(ct).ConfigureAwait(false); }
         catch (Exception ex) { log.LogError(ex, "Rollback fallito"); }
     }
 }

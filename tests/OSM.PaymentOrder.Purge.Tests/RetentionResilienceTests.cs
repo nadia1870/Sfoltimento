@@ -16,6 +16,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// struttura: slice atomiche, checkpoint, retry, validazioni.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class RetentionResilienceTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     public Task InitializeAsync() => db.ResetAsync();

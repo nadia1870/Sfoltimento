@@ -23,6 +23,7 @@ public readonly record struct SqlParam(string Name, object? Value, SqlDbType? Ty
 /// dell'applicazione (v10 §5).
 /// </summary>
 public sealed class SqlExecutor(string connectionString, int commandTimeoutSeconds = 300)
+    : ISqlExecutor
 {
     public string ConnectionString { get; } = connectionString;
     public int CommandTimeoutSeconds { get; } = commandTimeoutSeconds;
@@ -73,8 +74,12 @@ public sealed class SqlExecutor(string connectionString, int commandTimeoutSecon
         return (T)Convert.ChangeType(value, typeof(T));
     }
 
+    public async Task<IPurgeSession> BeginSessionAsync(CancellationToken ct) =>
+        await SqlSession.OpenAsync(ConnectionString, CommandTimeoutSeconds, ct)
+            .ConfigureAwait(false);
+
     public async Task<List<TRow>> QueryAsync<TRow>(string sql,
-        Func<SqlDataReader, TRow> map, CancellationToken ct, params SqlParam[] parameters)
+        Func<IDataRecord, TRow> map, CancellationToken ct, params SqlParam[] parameters)
     {
         var rows = new List<TRow>();
         await using var conn = await OpenAsync(ct).ConfigureAwait(false);

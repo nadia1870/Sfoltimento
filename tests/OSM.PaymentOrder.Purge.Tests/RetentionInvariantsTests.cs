@@ -11,6 +11,7 @@ namespace OSM.PaymentOrder.Purge.Tests;
 /// di regressione, non esercizi teorici.
 /// </summary>
 [Collection("PurgeDatabase")]
+[Trait("Category", "Integration")]
 public sealed class RetentionInvariantsTests(PurgeDatabaseFixture db) : IAsyncLifetime
 {
     // xUnit invoca InitializeAsync prima di OGNI test della classe.

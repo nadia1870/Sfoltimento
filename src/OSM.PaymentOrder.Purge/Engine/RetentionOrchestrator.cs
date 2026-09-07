@@ -53,7 +53,8 @@ public sealed class RetentionOrchestrator(
             log.LogError("PurgeRunExhausted RunId={RunId} Phase={Phase} Interruzioni={Count}",
                 runId, run.Phase, run.InterruptionCount);
 
-            await store.SetPhaseAsync(runId, RunPhase.Failed, ct, motivo).ConfigureAwait(false);
+            await CheckpointAsync(t => store.SetPhaseAsync(runId, RunPhase.Failed, t, motivo))
+                .ConfigureAwait(false);
             return;
         }
 
@@ -71,12 +72,12 @@ public sealed class RetentionOrchestrator(
                 // cannot distinguish "not started" from "interrupted while
                 // selecting" and the lifecycle checkpoint is wrong.
                 if (run.Phase != phase.Phase)
-                    await TransitionAsync(run, phase.Phase, null, ct).ConfigureAwait(false);
+                    await TransitionAsync(run, phase.Phase, null).ConfigureAwait(false);
 
                 var result = await phase.ExecuteAsync(run, ct).ConfigureAwait(false);
 
                 if (result.NextPhase is { } nextPhase)
-                    await TransitionAsync(run, nextPhase, result.Error, ct).ConfigureAwait(false);
+                    await TransitionAsync(run, nextPhase, result.Error).ConfigureAwait(false);
 
                 if (result.Stop)
                 {
@@ -115,8 +116,8 @@ public sealed class RetentionOrchestrator(
             // corrente e' il checkpoint. Marcare Failed qui significherebbe
             // buttare un set di candidati congelato e ore di lavoro gia' fatto
             // perche' la rete e' caduta per un secondo.
-            await store.RecordInterruptionAsync(
-                runId, ex.Message, CancellationToken.None).ConfigureAwait(false);
+            await CheckpointAsync(t => store.RecordInterruptionAsync(runId, ex.Message, t))
+                .ConfigureAwait(false);
 
             log.LogWarning(ex,
                 "PurgeRunInterrupted RunId={RunId} Phase={Phase} Interruzione={Count} — " +
@@ -128,10 +129,35 @@ public sealed class RetentionOrchestrator(
         catch (Exception ex)
         {
             log.LogError(ex, "PurgeRunFailed RunId={RunId} Phase={Phase}", runId, run.Phase);
-            await store.SetPhaseAsync(
-                runId, RunPhase.Failed, CancellationToken.None, ex.Message).ConfigureAwait(false);
+            await CheckpointAsync(t => store.SetPhaseAsync(runId, RunPhase.Failed, t, ex.Message))
+                .ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Tempo concesso alla scrittura di uno stato gia' deciso.
+    /// </summary>
+    private static readonly TimeSpan CheckpointTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Scrive un checkpoint con un token proprio, non quello del lavoro.
+    ///
+    /// La distinzione e' fra lavoro cancellabile e registrazione di un fatto
+    /// gia' avvenuto. Interrompere una fase alla chiusura della finestra e'
+    /// corretto; non scrivere che quella fase e' stata raggiunta non lo e': il
+    /// run riprenderebbe da una fase diversa da quella in cui si e' fermato, e
+    /// il checkpoint su cui si regge tutta la ripresa direbbe il falso.
+    ///
+    /// Non CancellationToken.None, pero'. Una connessione appesa terrebbe il
+    /// servizio in spegnimento a tempo indeterminato, e uno spegnimento che
+    /// non finisce e' un guasto suo. Dieci secondi sono abbastanza per una
+    /// UPDATE su una riga e poco abbastanza da non bloccare nessuno.
+    /// </summary>
+    private static async Task CheckpointAsync(Func<CancellationToken, Task> scrittura)
+    {
+        using var cts = new CancellationTokenSource(CheckpointTimeout);
+        await scrittura(cts.Token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -153,13 +179,16 @@ public sealed class RetentionOrchestrator(
         _ => false
     };
 
-    private async Task TransitionAsync(
-        PurgeRun run,
-        RunPhase nextPhase,
-        string? error,
-        CancellationToken ct)
+    /// <summary>
+    /// Il passaggio di fase e' il checkpoint del run. Non prende il token del
+    /// lavoro: una volta decisa, la transizione va scritta anche se la finestra
+    /// si e' chiusa nel frattempo.
+    /// </summary>
+    private async Task TransitionAsync(PurgeRun run, RunPhase nextPhase, string? error)
     {
-        await store.SetPhaseAsync(run.RunId, nextPhase, ct, error).ConfigureAwait(false);
+        await CheckpointAsync(t => store.SetPhaseAsync(run.RunId, nextPhase, t, error))
+            .ConfigureAwait(false);
+
         run.Phase = nextPhase;
     }
 

@@ -9,6 +9,7 @@ using Xunit;
 
 namespace OSM.PaymentOrder.Purge.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class BatchExecutionCoordinatorTests
 {
     [Fact]
@@ -251,6 +252,44 @@ public sealed class BatchExecutionCoordinatorTests
         Assert.Empty(workProvider.RecordedAttempts);
     }
 
+    /// <summary>
+    /// A2 — il progresso si segnala una volta per sessione, non per slice.
+    ///
+    /// Il contatore vive su una riga condivisa di PurgeRun: azzerarlo a ogni
+    /// slice sarebbe una scrittura per slice, migliaia per run, per registrare
+    /// un'informazione che dopo la prima non cambia piu'.
+    /// </summary>
+    [Fact]
+    public async Task Il_progresso_si_segnala_una_volta_sola_per_sessione()
+    {
+        var slices = Enumerable.Range(0, 20).Select(n => Slice(n, 0)).ToArray();
+        var workProvider = new FakeWorkProvider(slices);
+        var coordinator = CreateSut(workProvider, new FakeExecutor((_, _) => SliceResult.Ok(1)));
+
+        var result = await coordinator.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(20, result.CompletedSlices);
+        Assert.Equal(1, workProvider.ProgressReports);
+    }
+
+    /// <summary>
+    /// Nessuna slice completata, nessun progresso da segnalare: un run che
+    /// abbandona tutto non ha fatto passi avanti, e le interruzioni delle notti
+    /// precedenti devono restare contate.
+    /// </summary>
+    [Fact]
+    public async Task Senza_slice_completate_non_si_segnala_progresso()
+    {
+        var workProvider = new FakeWorkProvider(Slice(1, 0), Slice(2, 0));
+        var coordinator = CreateSut(
+            workProvider, new FakeExecutor((_, _) => SliceResult.Fatal("difetto")));
+
+        await coordinator.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(0, workProvider.ProgressReports);
+        Assert.Equal(2, workProvider.Abandoned.Count);
+    }
+
     private sealed class FakeWorkProvider(params SliceInfo[] slices) : IBatchWorkProvider
     {
         private readonly Queue<SliceInfo> _slices = new(slices);
@@ -298,6 +337,19 @@ public sealed class BatchExecutionCoordinatorTests
         /// quelle lasciate da una finestra operativa precedente.
         /// </summary>
         public int PreviousSessionAbandoned { get; init; }
+
+        /// <summary>
+        /// Quante volte il coordinatore ha segnalato progresso. Deve essere una
+        /// sola per sessione, a prescindere dal numero di slice.
+        /// </summary>
+        public int ProgressReports { get; private set; }
+
+        public Task ReportProgressAsync(Guid runId, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ProgressReports++;
+            return Task.CompletedTask;
+        }
 
         public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct)
         {

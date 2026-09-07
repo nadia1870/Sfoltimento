@@ -6,6 +6,7 @@ using Xunit;
 
 namespace OSM.PaymentOrder.Purge.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class ExecutingPhaseTests
 {
     [Fact]

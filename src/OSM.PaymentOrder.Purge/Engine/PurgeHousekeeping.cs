@@ -25,7 +25,7 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// Un solo log di riepilogo.
 /// </summary>
 public sealed class PurgeHousekeeping(
-    SqlExecutor sql,
+    ISqlExecutor sql,
     IOptions<PurgeOptions> options,
     TimeProvider clock,
     ILogger<PurgeHousekeeping> log)
