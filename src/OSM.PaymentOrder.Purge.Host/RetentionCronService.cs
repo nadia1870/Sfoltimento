@@ -26,6 +26,7 @@ public sealed class RetentionCronService(
     IOptions<PurgeOptions> options,
     TimeProvider clock,
     PurgeExecutionLock executionLock,
+    PurgeWindowGuard windowGuard,
     ILogger<RetentionCronService> log) : BackgroundService
 {
     private readonly PurgeOptions _options = options.Value;
@@ -83,12 +84,25 @@ public sealed class RetentionCronService(
 
     private async Task RunAllStrategiesAsync(CancellationToken ct)
     {
+        // Controllo anticipato: aprire la finestra fuori orario produrrebbe una
+        // scadenza gia' scaduta, e il primo await fallirebbe con una
+        // cancellazione al posto di una riga di log comprensibile.
+        if (!_options.IsWithinWindow(clock.GetLocalNow()))
+        {
+            log.LogInformation("Fuori dalla finestra operativa: ciclo saltato.");
+            return;
+        }
+
         await using var lease = await executionLock.TryAcquireAsync(ct).ConfigureAwait(false);
         if (lease is null)
         {
             log.LogWarning("Un'altra istanza del purge è già in esecuzione: ciclo saltato.");
             return;
         }
+
+        // Le fasi lunghe — selezione, espansione, validazione, planning — non
+        // controllano la finestra da se': e' questo token a fermarle.
+        using var window = windowGuard.Open(ct);
 
         var strategies = new List<RetentionStrategy>(_options.Strategies);
 
@@ -109,14 +123,25 @@ public sealed class RetentionCronService(
 
             try
             {
-                var runId = await store.FindResumableAsync(strategy, ct).ConfigureAwait(false)
-                            ?? await store.CreateAsync(strategy, _options, clock.GetLocalNow(), ct)
+                var runId = await store.FindResumableAsync(strategy, window.Token).ConfigureAwait(false)
+                            ?? await store.CreateAsync(strategy, _options, clock.GetLocalNow(), window.Token)
                                           .ConfigureAwait(false);
 
-                await orchestrator.RunAsync(runId, ct).ConfigureAwait(false);
+                await orchestrator.RunAsync(runId, window.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                return;
+            }
+            catch (OperationCanceledException) when (window.ClosedByWindow)
+            {
+                // A differenza di una strategia fallita, qui non si prosegue: le
+                // successive lavorerebbero fuori finestra. Il run resta
+                // riprendibile e riparte dal checkpoint alla prossima apertura.
+                log.LogError(
+                    "Strategia {Strategy} interrotta dalla chiusura della finestra: " +
+                    "le strategie successive sono rinviate.", strategy);
+
                 return;
             }
             catch (Exception ex)
