@@ -204,3 +204,80 @@ public sealed class ServiceModeTests
     public void Solo_once_puo_cancellare() =>
         Assert.Equal(PurgeExecutionMode.Delete, Decidi(once: true, ["once", "--delete"]));
 }
+
+/// <summary>
+/// La finestra operativa in modalita' once.
+///
+/// Decide due cose diverse: quando partire, che in produzione lo stabilisce
+/// UC4, e quando smettere di prendere nuove slice, che non lo stabilisce
+/// nessun altro. Disattivarla perche' "lo scheduler decide quando eseguire"
+/// copriva solo la prima, e lasciava un run lungo proseguire nella mattina
+/// lavorativa.
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class OperatingWindowTests
+{
+    private static PurgeOptions Notturna() => new()
+    {
+        WindowEnabled = true,
+        WindowStart = new TimeOnly(1, 0),
+        WindowEnd = new TimeOnly(5, 0)
+    };
+
+    private static DateTimeOffset Alle(int ora, int minuti = 0) =>
+        new(2026, 3, 12, ora, minuti, 0, TimeSpan.Zero);
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(3, 30)]
+    [InlineData(4, 59)]
+    public void Dentro_la_finestra_si_procede(int ora, int minuti) =>
+        Assert.True(Notturna().IsWithinWindow(Alle(ora, minuti)));
+
+    [Theory]
+    [InlineData(0, 59)]
+    [InlineData(5, 0)]
+    [InlineData(9, 30)]
+    [InlineData(23, 0)]
+    public void Fuori_dalla_finestra_ci_si_ferma(int ora, int minuti) =>
+        Assert.False(Notturna().IsWithinWindow(Alle(ora, minuti)));
+
+    /// <summary>
+    /// La finestra disattivata vale sempre: e' cio' che --no-window ottiene,
+    /// e deve restare una richiesta esplicita.
+    /// </summary>
+    [Fact]
+    public void Con_la_finestra_disattivata_ogni_ora_va_bene()
+    {
+        var opzioni = Notturna();
+        opzioni.WindowEnabled = false;
+
+        Assert.True(opzioni.IsWithinWindow(Alle(11)));
+    }
+
+    /// <summary>
+    /// Il flag e' riconosciuto ovunque compaia negli argomenti e a
+    /// prescindere dalle maiuscole, come gli altri.
+    /// </summary>
+    [Theory]
+    [InlineData("once", "--delete", "--no-window")]
+    [InlineData("once", "--no-window", "--delete")]
+    [InlineData("once", "--DELETE", "--NO-WINDOW")]
+    public void Il_flag_no_window_e_riconosciuto(params string[] args) =>
+        Assert.Contains(args, a =>
+            a.Equals("--no-window", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Senza il flag la finestra resta quella configurata: la modalita' di
+    /// avvio non deve piu' disattivarla di straforo.
+    /// </summary>
+    [Fact]
+    public void Senza_il_flag_la_finestra_resta_attiva()
+    {
+        string[] args = ["once", "--delete"];
+
+        Assert.DoesNotContain(args, a =>
+            a.Equals("--no-window", StringComparison.OrdinalIgnoreCase));
+        Assert.True(Notturna().WindowEnabled);
+    }
+}
