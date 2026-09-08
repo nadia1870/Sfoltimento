@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Engine;
@@ -45,6 +46,61 @@ public sealed class RetentionInvariantsTests(PurgeDatabaseFixture db) : IAsyncLi
         var run = await RunAsync(RetentionStrategy.Terminated);
 
         Assert.Equal(RunPhase.Completed, run.Phase);
+    }
+
+    /// <summary>
+    /// Regressione del flush durante la lettura dei candidati.
+    ///
+    /// Il valore produttivo di FlushEvery e' 50.000, ma il numero non ha
+    /// significato funzionale: conta che il buffer venga svuotato mentre il
+    /// DataReader e' ancora aperto. Con 250 candidati e soglia 100 si forza
+    /// la stessa condizione a costo molto piu' basso.
+    /// </summary>
+    [Fact]
+    public async Task Planning_con_flush_durante_la_lettura_completa_tutti_i_candidati()
+    {
+        const int candidateCount = 250;
+        const int flushEvery = 100;
+
+        for (var i = 0; i < candidateCount; i++)
+            await Seed.AddOrderAsync();
+
+        var runId = await db.Store.CreateAsync(
+            RetentionStrategy.Terminated, db.Options, DateTimeOffset.Now, default);
+        var run = await db.Store.LoadAsync(runId, default);
+
+        var strategy = db.Strategies.Resolve(run.Strategy);
+        var selected = await strategy.SelectAsync(run, default);
+        Assert.Equal(candidateCount, selected);
+
+        await strategy.ExpandAsync(run, default);
+
+        var findings = await db.Services.GetRequiredService<PreDeleteValidator>()
+            .ValidateAsync(run, default);
+        Assert.False(findings.HasBlockingIssues, findings.FailedRules);
+
+        var planner = new BatchPlanner(
+            db.Sql,
+            db.Strategies,
+            db.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger<BatchPlanner>(),
+            flushEvery);
+
+        var slices = await planner.PlanAsync(run, default);
+
+        Assert.True(slices > 1);
+
+        var assigned = await db.Sql.ScalarAsync<long>(
+            """
+            SELECT COUNT_BIG(*)
+            FROM Purge.RunCandidateOrder
+            WHERE RunId = @RunId
+              AND BatchNo IS NOT NULL;
+            """,
+            default,
+            SqlParam.Of("@RunId", run.RunId));
+
+        Assert.Equal(candidateCount, assigned);
     }
 
     /// <summary>Nessuna riga deve sopravvivere al proprio padre.</summary>

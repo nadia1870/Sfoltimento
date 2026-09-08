@@ -361,6 +361,27 @@ public static class RetentionSql
         ORDER BY CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId;
         """;
 
+    /// <summary>Pagina keyset per il planning: l'anchor segue esattamente l'ordinamento del planner.</summary>
+    public const string ReadCandidatesForPlanningPage = """
+        SELECT TOP (@PageSize) OrderId, RowWeight, CollectiveOrderId
+        FROM Purge.RunCandidateOrder
+        WHERE RunId = @RunId AND State = 'Selected'
+          AND (
+              @HasAnchor = 0
+              OR CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END > @LastSortGroup
+              OR (
+                  CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END = @LastSortGroup
+                  AND (
+                      (CollectiveOrderId IS NULL AND OrderId > @LastOrderId)
+                      OR (CollectiveOrderId IS NOT NULL AND CollectiveOrderId > @LastCollectiveOrderId)
+                      OR (CollectiveOrderId IS NOT NULL AND CollectiveOrderId = @LastCollectiveOrderId
+                          AND OrderId > @LastOrderId)
+                  )
+              )
+          )
+        ORDER BY CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId;
+        """;
+
     public const string CreateOrphanAssignmentTempTable = """
         CREATE TABLE #assignOrphan (OrderHistoryId UNIQUEIDENTIFIER PRIMARY KEY,
                                     BatchNo INT NOT NULL);
@@ -370,6 +391,14 @@ public static class RetentionSql
         SELECT OrderHistoryId
         FROM Purge.RunCandidateOrderHistory
         WHERE RunId = @RunId AND OrderId IS NULL AND BatchNo IS NULL
+        ORDER BY OrderHistoryId;
+        """;
+
+    public const string ReadOrphansForPlanningPage = """
+        SELECT TOP (@PageSize) OrderHistoryId
+        FROM Purge.RunCandidateOrderHistory
+        WHERE RunId = @RunId AND OrderId IS NULL AND BatchNo IS NULL
+          AND (@LastOrderHistoryId IS NULL OR OrderHistoryId > @LastOrderHistoryId)
         ORDER BY OrderHistoryId;
         """;
 

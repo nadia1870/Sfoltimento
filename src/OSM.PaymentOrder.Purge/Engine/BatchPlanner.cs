@@ -28,9 +28,12 @@ namespace OSM.PaymentOrder.Purge.Engine;
 public sealed class BatchPlanner(
     SqlExecutor sql,
     PurgeStrategyResolver strategyResolver,
-    ILogger<BatchPlanner> log)
+    ILogger<BatchPlanner> log,
+    int flushEvery = 50_000)
 {
-    private const int FlushEvery = 50_000;
+    private readonly int _flushEvery = flushEvery > 0
+        ? flushEvery
+        : throw new ArgumentOutOfRangeException(nameof(flushEvery));
 
     private sealed record Candidate(Guid OrderId, int Weight, Guid? CollectiveOrderId);
 
@@ -98,11 +101,6 @@ public sealed class BatchPlanner(
             collectiveWeight = 0;
             currentCollective = null;
 
-            if (buffer.Rows.Count >= FlushEvery)
-            {
-                await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
-                buffer = NewTable();
-            }
         }
 
         async Task AssignStandaloneAsync(Candidate candidate)
@@ -139,42 +137,73 @@ public sealed class BatchPlanner(
                 ordersInBatch++;
             }
 
-            if (buffer.Rows.Count >= FlushEvery)
+        }
+
+        // Il DataReader non puo' restare aperto mentre SqlBulkCopy usa la stessa
+        // SqlConnection. Leggiamo quindi pagine keyset: ogni reader viene chiuso
+        // prima del flush e poi la lettura riparte dall'ultima chiave ordinata.
+        var hasAnchor = false;
+        Guid? lastOrderId = null;
+        Guid? lastCollectiveOrderId = null;
+        var lastSortGroup = 0;
+
+        while (true)
+        {
+            var pageRead = false;
+
+            await using (var read = sql.Command(conn, null,
+                            RetentionSql.ReadCandidatesForPlanningPage,
+                            SqlParam.Of("@RunId", run.RunId),
+                            SqlParam.Typed("@PageSize", _flushEvery, SqlDbType.Int),
+                            SqlParam.Typed("@HasAnchor", hasAnchor, SqlDbType.Bit),
+                            SqlParam.Typed("@LastSortGroup", lastSortGroup, SqlDbType.Int),
+                            SqlParam.Typed("@LastCollectiveOrderId", lastCollectiveOrderId, SqlDbType.UniqueIdentifier),
+                            SqlParam.Typed("@LastOrderId", lastOrderId, SqlDbType.UniqueIdentifier)))
+            await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    pageRead = true;
+                    var candidate = new Candidate(
+                        reader.GetGuid(0),
+                        reader.IsDBNull(1) ? 1 : reader.GetInt32(1),
+                        reader.IsDBNull(2) ? null : reader.GetGuid(2));
+                    total++;
+
+                    if (candidate.CollectiveOrderId is Guid collectiveId)
+                    {
+                        if (currentCollective is null)
+                            currentCollective = collectiveId;
+                        else if (currentCollective != collectiveId)
+                            await FlushCollectiveAsync().ConfigureAwait(false);
+
+                        currentCollective ??= collectiveId;
+                        collectiveBuffer.Add(candidate);
+                        collectiveWeight += candidate.Weight;
+                    }
+                    else
+                    {
+                        await FlushCollectiveAsync().ConfigureAwait(false);
+                        await AssignStandaloneAsync(candidate).ConfigureAwait(false);
+                    }
+
+                    hasAnchor = true;
+                    lastOrderId = candidate.OrderId;
+                    lastCollectiveOrderId = candidate.CollectiveOrderId;
+                    lastSortGroup = candidate.CollectiveOrderId.HasValue ? 1 : 0;
+                }
+            }
+
+            // Il reader e' gia' stato disposed: da questo punto SqlBulkCopy puo'
+            // usare in sicurezza la stessa connection e le #temp table di sessione.
+            if (buffer.Rows.Count >= _flushEvery)
             {
                 await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
                 buffer = NewTable();
             }
-        }
 
-        await using (var read = sql.Command(conn, null,
-                        RetentionSql.ReadCandidatesForPlanning, SqlParam.Of("@RunId", run.RunId)))
-        await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
-        {
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
-            {
-                var candidate = new Candidate(
-                    reader.GetGuid(0),
-                    reader.IsDBNull(1) ? 1 : reader.GetInt32(1),
-                    reader.IsDBNull(2) ? null : reader.GetGuid(2));
-                total++;
-
-                if (candidate.CollectiveOrderId is Guid collectiveId)
-                {
-                    if (currentCollective is null)
-                        currentCollective = collectiveId;
-                    else if (currentCollective != collectiveId)
-                        await FlushCollectiveAsync().ConfigureAwait(false);
-
-                    currentCollective ??= collectiveId;
-                    collectiveBuffer.Add(candidate);
-                    collectiveWeight += candidate.Weight;
-                }
-                else
-                {
-                    await FlushCollectiveAsync().ConfigureAwait(false);
-                    await AssignStandaloneAsync(candidate).ConfigureAwait(false);
-                }
-            }
+            if (!pageRead)
+                break;
         }
 
         await FlushCollectiveAsync().ConfigureAwait(false);
@@ -224,21 +253,36 @@ public sealed class BatchPlanner(
         var inBatch = 0;
         var total = 0;
 
-        await using (var read = sql.Command(conn, null, RetentionSql.ReadOrphansForPlanning, SqlParam.Of("@RunId", run.RunId)))
-        await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        Guid? lastOrderHistoryId = null;
+        while (true)
         {
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            var pageRead = false;
+            await using (var read = sql.Command(conn, null, RetentionSql.ReadOrphansForPlanningPage,
+                            SqlParam.Of("@RunId", run.RunId),
+                            SqlParam.Typed("@PageSize", _flushEvery, SqlDbType.Int),
+                            SqlParam.Typed("@LastOrderHistoryId", lastOrderHistoryId, SqlDbType.UniqueIdentifier)))
+            await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
-                if (inBatch >= run.MaxOrdersPerBatch) { batchNo++; inBatch = 0; }
-                table.Rows.Add(reader.GetGuid(0), batchNo);
-                inBatch++;
-                total++;
-                if (table.Rows.Count >= FlushEvery)
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
-                    table.Clear();
+                    pageRead = true;
+                    var id = reader.GetGuid(0);
+                    if (inBatch >= run.MaxOrdersPerBatch) { batchNo++; inBatch = 0; }
+                    table.Rows.Add(id, batchNo);
+                    inBatch++;
+                    total++;
+                    lastOrderHistoryId = id;
                 }
             }
+
+            if (table.Rows.Count >= _flushEvery)
+            {
+                await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
+                table.Clear();
+            }
+
+            if (!pageRead)
+                break;
         }
 
         if (table.Rows.Count > 0)
