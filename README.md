@@ -30,6 +30,7 @@ src/OSM.PaymentOrder.Purge/         motore
 src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
 
 docs/runbook-primo-dry-run.md       procedura per la prima simulazione in produzione
+docs/runbook-prima-esecuzione-reale.md  procedura per il primo --delete
 docs/decisioni.md                   scelte non ovvie e perche'
 ```
 
