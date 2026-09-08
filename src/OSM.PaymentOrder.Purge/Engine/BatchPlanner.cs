@@ -35,8 +35,6 @@ public sealed class BatchPlanner(
         ? flushEvery
         : throw new ArgumentOutOfRangeException(nameof(flushEvery));
 
-    private sealed record Candidate(Guid OrderId, int Weight, Guid? CollectiveOrderId);
-
     public async Task<int> PlanAsync(PurgeRun run, CancellationToken ct)
     {
         var strategy = strategyResolver.Resolve(run.Strategy);
@@ -48,93 +46,14 @@ public sealed class BatchPlanner(
             await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
         var buffer = NewTable();
-        var batchNo = 0;
-        var rowsInBatch = 0;
-        var ordersInBatch = 0;
-        var oversized = 0;
-        var total = 0;
-        Guid? currentCollective = null;
-        var collectiveBuffer = new List<Candidate>();
-        var collectiveWeight = 0;
+        var packer = new BatchPacker(run.MaxRowsPerBatch, run.MaxOrdersPerBatch);
 
-        async Task FlushCollectiveAsync()
+        void AddAssignments(IReadOnlyList<BatchPacker.Assignment> assignments)
         {
-            if (collectiveBuffer.Count == 0)
-                return;
-
-            var collectiveId = collectiveBuffer[0].CollectiveOrderId;
-            if (collectiveId is null)
-                throw new InvalidOperationException("Collective buffer senza CollectiveOrderId.");
-
-            var collectiveOrders = collectiveBuffer.Count;
-            var isOversized = collectiveWeight > run.MaxRowsPerBatch ||
-                              collectiveOrders > run.MaxOrdersPerBatch;
-
-            if (isOversized ||
-                (ordersInBatch > 0 &&
-                 (rowsInBatch + collectiveWeight > run.MaxRowsPerBatch ||
-                  ordersInBatch + collectiveOrders > run.MaxOrdersPerBatch)))
+            foreach (var assignment in assignments)
             {
-                if (ordersInBatch > 0)
-                {
-                    batchNo++;
-                    rowsInBatch = 0;
-                    ordersInBatch = 0;
-                }
-            }
-
-            foreach (var candidate in collectiveBuffer)
-                buffer.Rows.Add(candidate.OrderId, batchNo, isOversized, collectiveId.Value);
-
-            rowsInBatch += collectiveWeight;
-            ordersInBatch += collectiveOrders;
-
-            if (isOversized)
-            {
-                oversized++;
-                batchNo++;
-                rowsInBatch = 0;
-                ordersInBatch = 0;
-            }
-
-            collectiveBuffer.Clear();
-            collectiveWeight = 0;
-            currentCollective = null;
-
-        }
-
-        async Task AssignStandaloneAsync(Candidate candidate)
-        {
-            var isOversized = candidate.Weight > run.MaxRowsPerBatch || 1 > run.MaxOrdersPerBatch;
-            if (isOversized)
-            {
-                if (ordersInBatch > 0)
-                {
-                    batchNo++;
-                    rowsInBatch = 0;
-                    ordersInBatch = 0;
-                }
-
-                buffer.Rows.Add(candidate.OrderId, batchNo, true, DBNull.Value);
-                oversized++;
-                batchNo++;
-                rowsInBatch = 0;
-                ordersInBatch = 0;
-            }
-            else
-            {
-                var wouldExceedRows = rowsInBatch + candidate.Weight > run.MaxRowsPerBatch;
-                var wouldExceedOrders = ordersInBatch + 1 > run.MaxOrdersPerBatch;
-                if (ordersInBatch > 0 && (wouldExceedRows || wouldExceedOrders))
-                {
-                    batchNo++;
-                    rowsInBatch = 0;
-                    ordersInBatch = 0;
-                }
-
-                buffer.Rows.Add(candidate.OrderId, batchNo, false, DBNull.Value);
-                rowsInBatch += candidate.Weight;
-                ordersInBatch++;
+                buffer.Rows.Add(assignment.OrderId, assignment.BatchNo,
+                    assignment.IsOversized, assignment.CollectiveOrderId is Guid id ? id : DBNull.Value);
             }
 
         }
@@ -164,28 +83,12 @@ public sealed class BatchPlanner(
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
                     pageRead = true;
-                    var candidate = new Candidate(
+                    var candidate = new BatchPacker.Candidate(
                         reader.GetGuid(0),
                         reader.IsDBNull(1) ? 1 : reader.GetInt32(1),
                         reader.IsDBNull(2) ? null : reader.GetGuid(2));
-                    total++;
 
-                    if (candidate.CollectiveOrderId is Guid collectiveId)
-                    {
-                        if (currentCollective is null)
-                            currentCollective = collectiveId;
-                        else if (currentCollective != collectiveId)
-                            await FlushCollectiveAsync().ConfigureAwait(false);
-
-                        currentCollective ??= collectiveId;
-                        collectiveBuffer.Add(candidate);
-                        collectiveWeight += candidate.Weight;
-                    }
-                    else
-                    {
-                        await FlushCollectiveAsync().ConfigureAwait(false);
-                        await AssignStandaloneAsync(candidate).ConfigureAwait(false);
-                    }
+                    AddAssignments(packer.Add(candidate));
 
                     hasAnchor = true;
                     lastOrderId = candidate.OrderId;
@@ -206,7 +109,7 @@ public sealed class BatchPlanner(
                 break;
         }
 
-        await FlushCollectiveAsync().ConfigureAwait(false);
+        AddAssignments(packer.Complete());
 
         if (buffer.Rows.Count > 0)
             await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
@@ -222,19 +125,19 @@ public sealed class BatchPlanner(
             await init.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        var sliceCount = total == 0 ? 0 : batchNo + (rowsInBatch > 0 || ordersInBatch > 0 ? 1 : 0);
+        var sliceCount = packer.SliceCount;
 
         log.LogInformation(
             "PurgePlanningCompleted RunId={RunId} Ordini={Orders} Slice={Slices} " +
             "Oversized={Oversized} MaxRighe={MaxRows} MaxOrdini={MaxOrders} CollectiveAtomic={CollectiveAtomic}",
-            run.RunId, total, sliceCount, oversized, run.MaxRowsPerBatch, run.MaxOrdersPerBatch,
+            run.RunId, packer.Total, sliceCount, packer.OversizedCount, run.MaxRowsPerBatch, run.MaxOrdersPerBatch,
             run.Strategy == RetentionStrategy.Collective);
 
-        if (oversized > 0)
+        if (packer.OversizedCount > 0)
         {
             log.LogWarning(
                 "RunId={RunId}: {Count} aggregati oversized. Per i Collective l'intero " +
-                "aggregato resta comunque nella stessa transazione.", run.RunId, oversized);
+                "aggregato resta comunque nella stessa transazione.", run.RunId, packer.OversizedCount);
         }
 
         return sliceCount;
