@@ -112,6 +112,9 @@ internal sealed class FakeSqlExecutor(IPurgeSession session, Exception? openFail
         CancellationToken ct, params SqlParam[] p) =>
         throw new InvalidOperationException("SliceExecutor non deve usare l'accesso senza stato.");
 
+    public Task<List<T>> QueryAsync<T>(string sql, CancellationToken ct, params SqlParam[] p) =>
+        throw new InvalidOperationException("SliceExecutor non deve usare l'accesso senza stato.");
+
     public Task<IPurgeSession> BeginSessionAsync(CancellationToken ct) =>
         openFailure is not null
             ? throw openFailure

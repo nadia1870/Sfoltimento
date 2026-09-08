@@ -320,7 +320,7 @@ public static class RetentionSql
 
     /// <summary>Collettivi esclusi per motivo, per il report del dry-run.</summary>
     public const string CountExcludedCollectivesByReason = """
-        SELECT ExcludedReason, COUNT_BIG(*)
+        SELECT ExcludedReason, Collectives = COUNT_BIG(*)
         FROM Purge.RunCandidateCollective
         WHERE RunId = @RunId AND State = 'Excluded'
         GROUP BY ExcludedReason

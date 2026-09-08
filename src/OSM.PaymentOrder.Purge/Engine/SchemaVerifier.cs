@@ -85,7 +85,7 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
 
     private async Task<IReadOnlyList<string>> FindMissingColumnsAsync(CancellationToken ct)
     {
-        var present = (await sql.QueryAsync(ColumnQuery, r => r.GetString(0), ct).ConfigureAwait(false))
+        var present = (await sql.QueryAsync<string>(ColumnQuery, ct).ConfigureAwait(false))
             .Select(n => n.Replace("[", string.Empty).Replace("]", string.Empty))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -98,7 +98,7 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
     /// <summary>Restituisce le tabelle attese e assenti. Vuoto = schema allineato.</summary>
     public async Task<IReadOnlyList<string>> FindMissingAsync(CancellationToken ct)
     {
-        var present = (await sql.QueryAsync(Query, r => r.GetString(0), ct).ConfigureAwait(false))
+        var present = (await sql.QueryAsync<string>(Query, ct).ConfigureAwait(false))
             .Select(n => n.Replace("[", string.Empty).Replace("]", string.Empty))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 

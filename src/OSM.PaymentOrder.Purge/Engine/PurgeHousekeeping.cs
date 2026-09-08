@@ -30,6 +30,11 @@ public sealed class PurgeHousekeeping(
     TimeProvider clock,
     ILogger<PurgeHousekeeping> log)
 {
+    private sealed record RunToClean(Guid RunId, string Strategy, string Phase);
+
+    /// <summary>Colonne di RetentionSql.StagingFootprint. NULL diventa zero.</summary>
+    private sealed record Footprint(int RunConStaging, long Ordini, long Storici);
+
     private readonly PurgeOptions _options = options.Value;
 
     public async Task<int> RunAsync(CancellationToken ct)
@@ -44,12 +49,7 @@ public sealed class PurgeHousekeeping(
         var completedCutoff = now.AddDays(-_options.StagingRetentionDays);
         var failedCutoff = now.AddDays(-_options.FailedStagingRetentionDays);
 
-        var runs = await sql.QueryAsync(RetentionSql.SelectRunsToClean, r => new
-        {
-            RunId = r.GetGuid(0),
-            Strategy = r.GetString(1),
-            Phase = r.GetString(2)
-        }, ct,
+        var runs = await sql.QueryAsync<RunToClean>(RetentionSql.SelectRunsToClean, ct,
             SqlParam.Of("@MaxRuns", _options.HousekeepingMaxRunsPerCycle),
             SqlParam.Of("@CompletedCutoff", completedCutoff),
             SqlParam.Of("@FailedCutoff", failedCutoff)).ConfigureAwait(false);
@@ -131,19 +131,15 @@ public sealed class PurgeHousekeeping(
     {
         try
         {
-            var footprint = await sql.QueryAsync(RetentionSql.StagingFootprint, r => new
-            {
-                Runs = r.IsDBNull(0) ? 0 : r.GetInt32(0),
-                Ordini = r.IsDBNull(1) ? 0L : r.GetInt64(1),
-                Storici = r.IsDBNull(2) ? 0L : r.GetInt64(2)
-            }, ct).ConfigureAwait(false);
+            var footprint = await sql.QueryAsync<Footprint>(RetentionSql.StagingFootprint, ct)
+                .ConfigureAwait(false);
 
             if (footprint.Count == 0) return;
 
             var f = footprint[0];
             log.LogInformation(
                 "StagingResiduo RunNonRipuliti={Runs} Ordini={Ordini} Storici={Storici}",
-                f.Runs, f.Ordini, f.Storici);
+                f.RunConStaging, f.Ordini, f.Storici);
         }
         catch (Exception ex)
         {

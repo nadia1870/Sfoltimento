@@ -57,15 +57,10 @@ public sealed class BatchedStatementRunner(
             };
             parameters.AddRange(extra);
 
-            var rows = await sql.QueryAsync(
-                statement,
-                r => new Page(
-                    r.GetInt32(0),
-                    r.GetInt32(1),
-                    r.IsDBNull(2) ? null : r.GetDateTime(2),
-                    r.IsDBNull(3) ? null : r.GetGuid(3)),
-                ct,
-                [.. parameters]).ConfigureAwait(false);
+            // Per nome: Inserted, Scanned, NextAnchor, NextId sono le colonne
+            // della riga di avanzamento che ogni statement paginato restituisce.
+            var rows = await sql.QueryAsync<Page>(statement, ct, [.. parameters])
+                .ConfigureAwait(false);
 
             if (rows.Count == 0)
             {

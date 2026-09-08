@@ -104,11 +104,27 @@ public sealed class SqlExecutor(string connectionString, int commandTimeoutSecon
         return await conn.ExecuteScalarAsync<T>(Define(sql, parameters, ct)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Mappa per nome di colonna su un record. E' la forma da preferire per
+    /// il codice di produzione: una colonna aggiunta o spostata nella query
+    /// non cambia in silenzio il significato di un GetInt32(5).
+    /// </summary>
+    public async Task<List<T>> QueryAsync<T>(string sql, CancellationToken ct,
+                                             params SqlParam[] parameters)
+    {
+        await using var conn = await OpenAsync(ct).ConfigureAwait(false);
+        var rows = await conn.QueryAsync<T>(Define(sql, parameters, ct)).ConfigureAwait(false);
+        return rows.AsList();
+    }
+
     public async Task<IPurgeSession> BeginSessionAsync(CancellationToken ct) =>
         await SqlSession.OpenAsync(ConnectionString, CommandTimeoutSeconds, ct)
             .ConfigureAwait(false);
 
-    /// <summary>Mappa posizionale da IDataRecord.</summary>
+    /// <summary>
+    /// Mappa posizionale da IDataRecord. Resta per i test e per le letture
+    /// ad hoc; in produzione e' sostituita dalla variante per nome.
+    /// </summary>
     public async Task<List<TRow>> QueryAsync<TRow>(string sql,
         Func<IDataRecord, TRow> map, CancellationToken ct, params SqlParam[] parameters)
     {
