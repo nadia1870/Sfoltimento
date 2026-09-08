@@ -260,3 +260,50 @@ passata: se compare un operatore Sort su volumi che contano, l'indice da
 valutare è `(RunId, State, CollectiveOrderId, OrderId) INCLUDE (RowWeight)`.
 Va deciso con un piano alla mano, non per precauzione: è un indice in più da
 mantenere su una tabella che cresce in proporzione ai dati cancellati.
+
+---
+
+## D-9 — La finestra operativa ferma anche le fasi che non sono l'esecuzione
+
+**Contesto.** `IsWithinWindow` era controllato in `BatchExecutionCoordinator` e
+in `PurgeHousekeeping`, cioè nelle due parti che lavorano a lotti. `Selecting`,
+`Expanding`, `Validating` e `Planning` non lo controllavano.
+`BatchedStatementRunner` dichiarava in un commento che «la cancellazione arriva
+a fine finestra operativa», ma nessuno cancellava niente: il token era quello
+dello spegnimento del servizio o del Ctrl-C. Su volumi reali quelle fasi
+proseguivano nella mattina lavorativa, in concorrenza con l'operativo — cioè
+esattamente ciò che il pacing fra le slice, `DEADLOCK_PRIORITY LOW` e le
+transazioni corte esistono per evitare.
+
+**Decisione.** `PurgeWindowGuard` produce un token legato a quello del
+chiamante e che scatta alla chiusura della finestra più una tolleranza
+(`WindowGrace`, cinque minuti di default). I due punti d'ingresso lo aprono e
+lo passano all'orchestratore al posto del token di spegnimento.
+
+**Perché non riusare il controllo del coordinatore.** Il coordinatore chiude la
+notte in modo ordinato: verifica la finestra fra una slice e l'altra e
+restituisce `WindowClosed`, senza eccezioni. Quel meccanismo resta il percorso
+normale e non è stato toccato. Il token è la rete per il caso che il
+coordinatore non copre, cioè una fase che non ha punti di verifica interni.
+
+**Perché la tolleranza.** Senza, il token scatterebbe nello stesso istante in
+cui il coordinatore decide di fermarsi, e la chiusura ordinata diventerebbe
+un'eccezione. Con la tolleranza, la notte normale non vede mai il token: se
+scatta, è perché una fase ha davvero superato la finestra. Per questo la
+scadenza si registra come `LogError` e non come informazione — è un'anomalia da
+misurare, non un evento previsto.
+
+**Conseguenze.**
+
+- L'orchestratore era già pronto: `OperationCanceledException` non cambia fase,
+  non conta come interruzione e lascia il run riprendibile dal checkpoint.
+- Uno sforamento non fa proseguire con le strategie successive: aprirne una
+  nuova fuori finestra sarebbe la cosa che si sta evitando.
+- `purge once` esce con codice **5** quando la finestra ha interrotto una
+  strategia. È una scelta di policy, non tecnica: il run riprende da solo la
+  notte dopo, ma uscire con zero renderebbe lo sforamento invisibile a UC4. Chi
+  configura gli allarmi deve sapere che 5 significa «rimandato», non «rotto».
+- `--no-window` continua a funzionare: disattiva `WindowEnabled`, e il
+  guardiano restituisce un ambito senza scadenza.
+- `PurgeHousekeeping` continua a usare il token di spegnimento: ha già il
+  proprio controllo di finestra fra un lotto e l'altro.

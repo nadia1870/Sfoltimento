@@ -238,6 +238,8 @@ public static class Program
             .Validate(o => o.Strategies.Count > 0, "Nessuna strategia configurata.")
             .Validate(o => o.HousekeepingWindowsAreConsistent,
                       "FailedStagingRetentionDays deve essere >= StagingRetentionDays.")
+            .Validate(o => o.WindowGrace >= TimeSpan.Zero,
+                      "WindowGrace non puo' essere negativa.")
             .ValidateOnStart();
 
         var cs = builder.Configuration.GetConnectionString("PaymentOrder");
@@ -298,6 +300,7 @@ public static class Program
         builder.Services.AddSingleton<IPurgePhase, ValidatingPhase>();
         builder.Services.AddSingleton<IPurgePhase, PlanningPhase>();
         builder.Services.AddSingleton<IPurgePhase, ExecutingPhase>();
+        builder.Services.AddSingleton<PurgeWindowGuard>();
         builder.Services.AddSingleton<PurgeExecutionLock>();
         builder.Services.AddSingleton<RetentionOrchestrator>();
 
@@ -405,22 +408,42 @@ public static class Program
 
         }
 
+        // La finestra vale anche per le fasi che non la controllano da se'.
+        // Il coordinatore continua a fermarsi in modo ordinato a fine finestra;
+        // questo token interviene solo se una fase la supera oltre la tolleranza.
+        using var window = host.Services.GetRequiredService<PurgeWindowGuard>()
+                               .Open(cts.Token);
+
         var failed = false;
+        var sforata = false;
+
         foreach (var strategy in strategies)
         {
             try
             {
-                var runId = await store.FindResumableAsync(strategy, cts.Token).ConfigureAwait(false)
-                            ?? await store.CreateAsync(strategy, options, clock.GetLocalNow(), cts.Token)
+                var runId = await store.FindResumableAsync(strategy, window.Token).ConfigureAwait(false)
+                            ?? await store.CreateAsync(strategy, options, clock.GetLocalNow(), window.Token)
                                           .ConfigureAwait(false);
 
                 Console.WriteLine($"{strategy,-16} run {runId}  DryRun={options.DryRun}");
-                await orchestrator.RunAsync(runId, cts.Token).ConfigureAwait(false);
+                await orchestrator.RunAsync(runId, window.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!window.ClosedByWindow)
             {
                 log.LogWarning("Interrotto dall'operatore.");
                 return 130;
+            }
+            catch (OperationCanceledException)
+            {
+                // Lo sforamento e' gia' stato registrato dal guardiano. Qui si
+                // decide solo che le strategie rimaste non partono: aprirne una
+                // nuova fuori finestra sarebbe la cosa che stiamo evitando.
+                log.LogError(
+                    "Strategia {Strategy} interrotta dalla chiusura della finestra: " +
+                    "le strategie successive sono rinviate.", strategy);
+
+                sforata = true;
+                break;
             }
             catch (Exception ex)
             {
@@ -448,6 +471,11 @@ public static class Program
             log.LogError(ex, "Housekeeping fallito.");
 
         }
+
+        // Codice dedicato allo sforamento: non e' un fallimento dei dati — il run
+        // riprende dal checkpoint la notte successiva — ma non e' nemmeno una
+        // notte riuscita, e uscire con zero lo renderebbe invisibile a UC4.
+        if (sforata) return 5;
 
         return failed ? 1 : 0;
     }

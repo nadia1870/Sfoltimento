@@ -147,6 +147,23 @@ public sealed class PurgeOptions
     public TimeOnly WindowEnd { get; set; } = new(5, 0);
 
     /// <summary>
+    /// Tolleranza oltre la chiusura della finestra, scaduta la quale le fasi
+    /// lunghe vengono interrotte d'autorita'.
+    ///
+    /// Non e' il meccanismo normale di chiusura: il coordinatore smette da se'
+    /// di prendere slice a fine finestra, e lo fa restituendo un esito, non
+    /// sollevando un'eccezione. La tolleranza esiste per il caso che quel
+    /// controllo non copre — una selezione, un'espansione o un planning ancora
+    /// in corso alle cinque del mattino — e scadere e' di per se' un'anomalia
+    /// da segnalare, non un evento previsto.
+    ///
+    /// Troppo corta interromperebbe la chiusura ordinata di una slice appena
+    /// iniziata; troppo lunga rimanderebbe il problema dentro l'orario
+    /// lavorativo, che e' cio' che si vuole evitare.
+    /// </summary>
+    public TimeSpan WindowGrace { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Espressione cron del risveglio. Il default corrisponde all'una di notte.
     /// La finestra resta il vero limite: il cron decide quando iniziare.
     /// </summary>
@@ -197,5 +214,28 @@ public sealed class PurgeOptions
         return WindowStart <= WindowEnd
             ? t >= WindowStart && t < WindowEnd
             : t >= WindowStart || t < WindowEnd;   // finestra a cavallo della mezzanotte
+    }
+
+    /// <summary>
+    /// Quanto manca alla chiusura della finestra. Null se la finestra non e'
+    /// attiva, zero se e' gia' chiusa.
+    ///
+    /// Serve a costruire la scadenza oltre la quale le fasi lunghe vengono
+    /// interrotte. Il coordinatore delle slice continua a fermarsi da se' a
+    /// fine finestra: questo calcolo copre le fasi che quel controllo non ce
+    /// l'hanno — selezione, espansione, validazione, planning.
+    /// </summary>
+    public TimeSpan? TimeUntilWindowEnd(DateTimeOffset now)
+    {
+        if (!WindowEnabled) return null;
+        if (!IsWithinWindow(now)) return TimeSpan.Zero;
+
+        var remaining = WindowEnd.ToTimeSpan() - TimeOnly.FromDateTime(now.DateTime).ToTimeSpan();
+
+        // Negativo significa che la chiusura cade dopo la mezzanotte rispetto
+        // a ora: e' il caso della finestra a cavallo, non un errore.
+        if (remaining <= TimeSpan.Zero) remaining += TimeSpan.FromDays(1);
+
+        return remaining;
     }
 }
