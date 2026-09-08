@@ -353,33 +353,56 @@ public static class RetentionSql
                NextId     = (SELECT MAX(OrderId) FROM @page);
         """;
 
-    /// <summary>Candidati ordinati per il bin packing streaming (§6.3).</summary>
-    public const string ReadCandidatesForPlanning = """
-        SELECT OrderId, RowWeight, CollectiveOrderId
+    // -----------------------------------------------------------------
+    // Il planning legge i candidati in DUE passate, non in una sola.
+    //
+    // La forma naturale e' un unico statement ordinato per
+    //   CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId
+    // ed e' sbagliata per la stessa ragione descritta in D-1: il CASE non e'
+    // sargable, quindi nessun indice puo' soddisfare l'ordinamento. Ogni pagina
+    // costringe a un sort del residuo, e il costo complessivo torna a essere
+    // quadratico proprio nella fase che la paginazione doveva rendere lineare.
+    //
+    // Le due passate producono lo stesso ordine — gli standalone prima, poi i
+    // collettivi raggruppati — ma sono entrambe seek su chiave:
+    //   1. standalone: keyset su OrderId, servita dalla PK cluster (RunId, OrderId);
+    //   2. collettivi: keyset su (CollectiveOrderId, OrderId).
+    //
+    // Per le strategie diverse da Collective la seconda passata non restituisce
+    // nulla: la selezione esclude esplicitamente gli ordini legati a un
+    // collettivo. Resta comunque incondizionata, perche' e' una scansione sola
+    // e non vogliamo che la correttezza del planning dipenda da un'invariante
+    // che vive in un altro file.
+    //
+    // Il sentinella e' Guid.Empty, come in ExpandAndWeigh: il minimo assoluto
+    // nell'ordinamento dei uniqueidentifier, quindi la prima pagina non ha
+    // bisogno di un ramo OR aggiuntivo che renderebbe il predicato non sargable.
+    // -----------------------------------------------------------------
+
+    /// <summary>Passata 1 — candidati non legati a un collettivo. Keyset su OrderId.</summary>
+    public const string ReadStandaloneCandidatesPage = """
+        SELECT TOP (@PageSize) OrderId, RowWeight
         FROM Purge.RunCandidateOrder
         WHERE RunId = @RunId AND State = 'Selected'
-        ORDER BY CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId;
+          AND CollectiveOrderId IS NULL
+          AND OrderId > @LastOrderId
+        ORDER BY OrderId;
         """;
 
-    /// <summary>Pagina keyset per il planning: l'anchor segue esattamente l'ordinamento del planner.</summary>
-    public const string ReadCandidatesForPlanningPage = """
+    /// <summary>
+    /// Passata 2 — componenti dei collettivi. Keyset su (CollectiveOrderId, OrderId):
+    /// e' l'ordinamento che garantisce la contiguita' su cui si regge il
+    /// BatchPacker, ed e' anche la ragione per cui la coppia va tenuta insieme
+    /// nell'anchor.
+    /// </summary>
+    public const string ReadCollectiveCandidatesPage = """
         SELECT TOP (@PageSize) OrderId, RowWeight, CollectiveOrderId
         FROM Purge.RunCandidateOrder
         WHERE RunId = @RunId AND State = 'Selected'
-          AND (
-              @HasAnchor = 0
-              OR CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END > @LastSortGroup
-              OR (
-                  CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END = @LastSortGroup
-                  AND (
-                      (CollectiveOrderId IS NULL AND OrderId > @LastOrderId)
-                      OR (CollectiveOrderId IS NOT NULL AND CollectiveOrderId > @LastCollectiveOrderId)
-                      OR (CollectiveOrderId IS NOT NULL AND CollectiveOrderId = @LastCollectiveOrderId
-                          AND OrderId > @LastOrderId)
-                  )
-              )
-          )
-        ORDER BY CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId;
+          AND CollectiveOrderId IS NOT NULL
+          AND (CollectiveOrderId > @LastCollectiveOrderId
+            OR (CollectiveOrderId = @LastCollectiveOrderId AND OrderId > @LastOrderId))
+        ORDER BY CollectiveOrderId, OrderId;
         """;
 
     public const string CreateOrphanAssignmentTempTable = """
@@ -387,18 +410,24 @@ public static class RetentionSql
                                     BatchNo INT NOT NULL);
         """;
 
-    public const string ReadOrphansForPlanning = """
-        SELECT OrderHistoryId
-        FROM Purge.RunCandidateOrderHistory
-        WHERE RunId = @RunId AND OrderId IS NULL AND BatchNo IS NULL
-        ORDER BY OrderHistoryId;
-        """;
-
+    /// <summary>
+    /// Storici orfani da pianificare. Keyset su OrderHistoryId, servito dalla
+    /// PK cluster (RunId, OrderHistoryId).
+    ///
+    /// Il filtro « BatchNo IS NULL » non c'e' piu', ed e' una correzione.
+    /// Il planning viene rieseguito da capo se il processo cade in quella fase:
+    /// con quel filtro la seconda esecuzione saltava gli orfani gia' assegnati
+    /// e faceva ripartire la numerazione da zero, quindi i nuovi BatchNo
+    /// collidevano con quelli del tentativo precedente e
+    /// InitializeOrphanBatchProgress raggruppava insieme due insiemi distinti,
+    /// producendo slice piu' grandi di MaxOrdersPerBatch. Rileggendo tutto, la
+    /// ripianificazione e' idempotente come quella degli ordini.
+    /// </summary>
     public const string ReadOrphansForPlanningPage = """
         SELECT TOP (@PageSize) OrderHistoryId
         FROM Purge.RunCandidateOrderHistory
-        WHERE RunId = @RunId AND OrderId IS NULL AND BatchNo IS NULL
-          AND (@LastOrderHistoryId IS NULL OR OrderHistoryId > @LastOrderHistoryId)
+        WHERE RunId = @RunId AND OrderId IS NULL
+          AND OrderHistoryId > @LastOrderHistoryId
         ORDER BY OrderHistoryId;
         """;
 

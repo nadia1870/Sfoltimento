@@ -276,7 +276,18 @@ public static class Program
         builder.Services.AddSingleton<IPurgeStrategy, OrphanHistoryStrategy>();
         builder.Services.AddSingleton<PurgeStrategyResolver>();
         builder.Services.AddSingleton<PreDeleteValidator>();
-        builder.Services.AddSingleton<BatchPlanner>();
+
+        // Registrazione esplicita: il timeout del bulk copy deve seguire
+        // CommandTimeoutSeconds. Con AddSingleton<BatchPlanner>() prendeva il
+        // valore di default del costruttore, che coincideva con quello
+        // configurato solo finche' nessuno toccava appsettings.
+        builder.Services.AddSingleton(sp => new BatchPlanner(
+            sp.GetRequiredService<SqlExecutor>(),
+            sp.GetRequiredService<PurgeStrategyResolver>(),
+            sp.GetRequiredService<ILogger<BatchPlanner>>(),
+            bulkCopyTimeoutSeconds: sp.GetRequiredService<IOptions<PurgeOptions>>()
+                                      .Value.CommandTimeoutSeconds));
+
         builder.Services.AddSingleton<DryRunReporter>();
         builder.Services.AddSingleton<SliceExecutor>();
         builder.Services.AddSingleton<IBatchWorkProvider, PurgeRunBatchWorkProvider>();

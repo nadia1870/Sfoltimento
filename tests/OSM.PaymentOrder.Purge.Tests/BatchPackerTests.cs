@@ -159,6 +159,81 @@ public sealed class BatchPackerTests
         Assert.Equal(Enumerable.Range(0, batches.Length), batches);
     }
 
+    /// <summary>
+    /// SliceCount e' il numero che finisce nel log di planning e che nessun
+    /// altro ricalcola. Contarlo con un'espressione a parte, invece che dalle
+    /// assegnazioni prodotte, e' il tipo di codice che resta corretto per caso:
+    /// qui lo si lega ai batch realmente emessi.
+    /// </summary>
+    [Theory]
+    // solo standalone, ultimo batch parziale
+    [InlineData(9, 0, false)]
+    // numero di candidati multiplo esatto della capienza del batch
+    [InlineData(8, 0, false)]
+    // un collettivo in coda
+    [InlineData(5, 3, false)]
+    // aggregato oversized come ultimo elemento: chiude il batch e non ne apre uno vuoto
+    [InlineData(5, 0, true)]
+    // oversized come unico elemento
+    [InlineData(0, 0, true)]
+    public void SliceCount_matches_the_batches_actually_emitted(
+        int standalone,
+        int collectiveComponents,
+        bool trailingOversized)
+    {
+        var sut = new BatchPacker(10, 4);
+        var candidates = new List<BatchPacker.Candidate>();
+
+        for (var i = 0; i < standalone; i++)
+            candidates.Add(Candidate(4));
+
+        if (collectiveComponents > 0)
+        {
+            var id = Guid.NewGuid();
+            for (var i = 0; i < collectiveComponents; i++)
+                candidates.Add(Candidate(2, id));
+        }
+
+        if (trailingOversized)
+            candidates.Add(Candidate(25));
+
+        var assignments = AddAll(sut, candidates);
+
+        Assert.Equal(
+            assignments.Select(a => a.BatchNo).Distinct().Count(),
+            sut.SliceCount);
+
+        // Contiguita' da zero: un buco significherebbe una slice che nessuno
+        // eseguira' mai, e RunBatchProgress la conterebbe comunque.
+        Assert.Equal(
+            Enumerable.Range(0, sut.SliceCount),
+            assignments.Select(a => a.BatchNo).Distinct().OrderBy(x => x));
+    }
+
+    /// <summary>
+    /// Il planning viene rieseguito da capo dopo un'interruzione. Se la stessa
+    /// sequenza producesse assegnazioni diverse, la ripianificazione non
+    /// sarebbe una ripetizione ma un piano nuovo, e il confronto fra dry-run
+    /// approvato ed esecuzione reale perderebbe significato.
+    /// </summary>
+    [Fact]
+    public void Packing_is_deterministic()
+    {
+        var collective = Guid.NewGuid();
+        var candidates = new List<BatchPacker.Candidate>();
+
+        for (var i = 0; i < 12; i++)
+            candidates.Add(Candidate(1 + i % 5));
+
+        for (var i = 0; i < 4; i++)
+            candidates.Add(Candidate(3, collective));
+
+        var first = AddAll(new BatchPacker(10, 4), candidates);
+        var second = AddAll(new BatchPacker(10, 4), candidates);
+
+        Assert.Equal(first, second);
+    }
+
     [Fact]
     public void Completing_twice_is_rejected()
     {

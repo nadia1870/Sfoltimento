@@ -1,6 +1,19 @@
 namespace OSM.PaymentOrder.Purge.Engine;
 
-/// <summary>Pure stateful packing algorithm with no SQL or I/O dependency.</summary>
+/// <summary>
+/// Algoritmo di bin packing delle slice.
+///
+/// Non e' una funzione pura: e' un accumulatore incrementale con stato, ed e'
+/// la forma giusta per uno stream di candidati che non sta in memoria. Le due
+/// proprieta' che contano, e su cui si reggono i test, sono altre: e'
+/// deterministico — la stessa sequenza di Add produce sempre le stesse
+/// assegnazioni — e non fa I/O.
+///
+/// Il chiamante deve rispettare un solo contratto: i candidati dello stesso
+/// CollectiveOrderId devono arrivare contigui. E' l'ordinamento delle query di
+/// lettura a garantirlo; se salta, ValidateCollectiveBatchIntegrity intercetta
+/// il collettivo spezzato in esecuzione, ma la slice viene abbandonata.
+/// </summary>
 internal sealed class BatchPacker
 {
     internal sealed record Candidate(Guid OrderId, int Weight, Guid? CollectiveOrderId);
@@ -28,6 +41,10 @@ internal sealed class BatchPacker
 
     internal int Total => _total;
     internal int OversizedCount => _oversized;
+    /// <summary>
+    /// Numero di slice prodotte. Ha significato solo dopo <see cref="Complete"/>:
+    /// letto prima, non conta i collettivi ancora nel buffer.
+    /// </summary>
     internal int SliceCount => _total == 0 ? 0 : _batchNo + (_rowsInBatch > 0 || _ordersInBatch > 0 ? 1 : 0);
 
     internal IReadOnlyList<Assignment> Add(Candidate candidate)
@@ -95,7 +112,10 @@ internal sealed class BatchPacker
 
     private Assignment AssignStandalone(Candidate candidate)
     {
-        var isOversized = candidate.Weight > _maxRowsPerBatch || 1 > _maxOrdersPerBatch;
+        // Un candidato standalone e' un ordine solo, quindi il tetto sul numero
+        // di ordini per slice non puo' essere superato: l'unico modo di essere
+        // oversized e' il peso in righe.
+        var isOversized = candidate.Weight > _maxRowsPerBatch;
         if (isOversized)
         {
             if (_ordersInBatch > 0) { _batchNo++; _rowsInBatch = 0; _ordersInBatch = 0; }

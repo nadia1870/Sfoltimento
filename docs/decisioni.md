@@ -211,3 +211,52 @@ problema perché il checkpoint di slice sta **dentro** la transazione. Se il
 commit è passato, la slice risulta `Completed` e non viene ripresa; se non è
 passato, resta `Pending`. Le due possibilità portano allo stesso comportamento
 corretto senza bisogno di distinguerle.
+
+---
+
+## D-8 — Il planning legge i candidati in due passate, non in una
+
+**Contesto.** Il `BatchPlanner` teneva un `DataReader` aperto per tutta la
+lettura dei candidati e faceva `SqlBulkCopy` sulla stessa connessione a ogni
+50.000 righe. Senza MARS quella combinazione non è ammessa: la prima
+esecuzione con più di 50.000 candidati sarebbe fallita, cioè la prima
+esecuzione reale. La correzione è passare a pagine, chiudendo il reader prima
+di ogni flush.
+
+**Decisione.** Le pagine sono due sequenze keyset distinte — prima gli
+standalone su `OrderId`, poi i componenti dei collettivi su
+`(CollectiveOrderId, OrderId)` — e non un unico statement ordinato per
+`CASE WHEN CollectiveOrderId IS NULL THEN 0 ELSE 1 END, CollectiveOrderId, OrderId`.
+
+**Perché non il loop ovvio.** L'ordinamento con il `CASE` produce esattamente
+la stessa sequenza ed è la forma naturale, ma il `CASE` non è sargable: nessun
+indice può soddisfare quell'`ORDER BY`, quindi **ogni pagina** paga un sort del
+residuo. Con N candidati e pagine da P il costo diventa N²/P, cioè la stessa
+trappola descritta in D-1, spostata dalla selezione al planning. Le due passate
+sono invece seek su chiave: la prima è servita dalla PK cluster
+`(RunId, OrderId)` senza alcun sort.
+
+Nota su SQL Server: in `ORDER BY` ascendente i NULL vengono per primi, quindi
+il `CASE` era anche ridondante — non stava ordinando, stava solo impedendo
+l'uso dell'indice.
+
+**Conseguenze.**
+
+- La contiguità dei componenti di un collettivo, che è il contratto del
+  `BatchPacker`, ora è garantita dalla seconda passata invece che da un
+  ordinamento globale. Il `BatchPacker` sopravvive al confine di pagina: è
+  quello che rende il caso testabile solo con il database.
+- Per le strategie diverse da `Collective` la seconda passata non restituisce
+  nulla. Resta comunque incondizionata: è una scansione sola, e non vogliamo
+  che la correttezza del planning dipenda da un'invariante che vive nelle query
+  di selezione.
+- Il sentinella è `Guid.Empty`, come in `ExpandAndWeigh`. Un ramo
+  `@LastId IS NULL OR ...` avrebbe reso il predicato di nuovo non sargable.
+- Il ciclo esce sulla pagina incompleta, non sulla pagina vuota: una query in
+  meno per passata.
+
+**Se un giorno va rifatta.** Il segnale è nel piano di esecuzione della seconda
+passata: se compare un operatore Sort su volumi che contano, l'indice da
+valutare è `(RunId, State, CollectiveOrderId, OrderId) INCLUDE (RowWeight)`.
+Va deciso con un piano alla mano, non per precauzione: è un indice in più da
+mantenere su una tabella che cresce in proporzione ai dati cancellati.

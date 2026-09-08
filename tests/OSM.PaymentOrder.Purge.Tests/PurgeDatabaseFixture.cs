@@ -126,7 +126,12 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton<PurgeStrategyResolver>();
 
         services.AddSingleton<PreDeleteValidator>();
-        services.AddSingleton<BatchPlanner>();
+        services.AddSingleton(sp => new BatchPlanner(
+            sp.GetRequiredService<SqlExecutor>(),
+            sp.GetRequiredService<PurgeStrategyResolver>(),
+            sp.GetRequiredService<ILogger<BatchPlanner>>(),
+            bulkCopyTimeoutSeconds: sp.GetRequiredService<IOptions<PurgeOptions>>()
+                                      .Value.CommandTimeoutSeconds));
         services.AddSingleton<DryRunReporter>();
 
         services.AddSingleton<SliceExecutor>();

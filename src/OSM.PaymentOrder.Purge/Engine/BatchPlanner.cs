@@ -60,52 +60,84 @@ public sealed class BatchPlanner(
             }
 
         }
-        // Il DataReader non puo' restare aperto mentre SqlBulkCopy usa la stessa
-        // SqlConnection. Leggiamo quindi pagine keyset: ogni reader viene chiuso
-        // prima del flush e poi la lettura riparte dall'ultima chiave ordinata.
-        var hasAnchor = false;
-        Guid? lastOrderId = null;
-        Guid? lastCollectiveOrderId = null;
-        var lastSortGroup = 0;
 
+        // Il DataReader non puo' restare aperto mentre SqlBulkCopy usa la stessa
+        // SqlConnection: ogni reader viene chiuso prima del flush e la lettura
+        // riparte dall'ultima chiave. Il packer sopravvive alle pagine, quindi
+        // un collettivo a cavallo del confine resta una sola unita'.
+        async Task FlushIfFullAsync()
+        {
+            if (buffer.Rows.Count < _flushEvery) return;
+            await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
+            buffer = NewTable();
+        }
+
+        // Passata 1 — standalone, keyset su OrderId.
+        var lastOrderId = Guid.Empty;
         while (true)
         {
-            var pageRead = false;
-            await using (var read = sql.Command(conn, null,
-                            RetentionSql.ReadCandidatesForPlanningPage,
+            ct.ThrowIfCancellationRequested();
+            var read = 0;
+
+            await using (var cmd = sql.Command(conn, null,
+                            RetentionSql.ReadStandaloneCandidatesPage,
                             SqlParam.Of("@RunId", run.RunId),
                             SqlParam.Typed("@PageSize", _flushEvery, SqlDbType.Int),
-                            SqlParam.Typed("@HasAnchor", hasAnchor, SqlDbType.Bit),
-                            SqlParam.Typed("@LastSortGroup", lastSortGroup, SqlDbType.Int),
-                            SqlParam.Typed("@LastCollectiveOrderId", lastCollectiveOrderId, SqlDbType.UniqueIdentifier),
                             SqlParam.Typed("@LastOrderId", lastOrderId, SqlDbType.UniqueIdentifier)))
-            await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
+            await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    pageRead = true;
-                    var candidate = new BatchPacker.Candidate(
-                        reader.GetGuid(0),
-                        reader.IsDBNull(1) ? 1 : reader.GetInt32(1),
-                        reader.IsDBNull(2) ? null : reader.GetGuid(2));
-                    AddAssignments(packer.Add(candidate));
+                    var orderId = reader.GetGuid(0);
+                    AddAssignments(packer.Add(new BatchPacker.Candidate(
+                        orderId, reader.IsDBNull(1) ? 1 : reader.GetInt32(1), null)));
 
-                    hasAnchor = true;
-                    lastOrderId = candidate.OrderId;
-                    lastCollectiveOrderId = candidate.CollectiveOrderId;
-                    lastSortGroup = candidate.CollectiveOrderId.HasValue ? 1 : 0;
+                    lastOrderId = orderId;
+                    read++;
                 }
             }
-            // Il reader e' gia' stato disposed: da questo punto SqlBulkCopy puo'
-            // usare in sicurezza la stessa connection e le #temp table di sessione.
-            if (buffer.Rows.Count >= _flushEvery)
+
+            await FlushIfFullAsync().ConfigureAwait(false);
+
+            // Pagina incompleta: la sorgente e' esaurita. Stessa condizione di
+            // uscita di BatchedStatementRunner, e risparmia la query a vuoto
+            // che serviva a scoprire la fine.
+            if (read < _flushEvery) break;
+        }
+
+        // Passata 2 — componenti dei collettivi, keyset su (CollectiveOrderId, OrderId).
+        var lastCollectiveOrderId = Guid.Empty;
+        lastOrderId = Guid.Empty;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var read = 0;
+
+            await using (var cmd = sql.Command(conn, null,
+                            RetentionSql.ReadCollectiveCandidatesPage,
+                            SqlParam.Of("@RunId", run.RunId),
+                            SqlParam.Typed("@PageSize", _flushEvery, SqlDbType.Int),
+                            SqlParam.Typed("@LastCollectiveOrderId", lastCollectiveOrderId, SqlDbType.UniqueIdentifier),
+                            SqlParam.Typed("@LastOrderId", lastOrderId, SqlDbType.UniqueIdentifier)))
+            await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
-                await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
-                buffer = NewTable();
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var orderId = reader.GetGuid(0);
+                    var collectiveOrderId = reader.GetGuid(2);
+
+                    AddAssignments(packer.Add(new BatchPacker.Candidate(
+                        orderId, reader.IsDBNull(1) ? 1 : reader.GetInt32(1), collectiveOrderId)));
+
+                    lastCollectiveOrderId = collectiveOrderId;
+                    lastOrderId = orderId;
+                    read++;
+                }
             }
 
-            if (!pageRead)
-                break;
+            await FlushIfFullAsync().ConfigureAwait(false);
+
+            if (read < _flushEvery) break;
         }
 
         AddAssignments(packer.Complete());
@@ -149,43 +181,52 @@ public sealed class BatchPlanner(
         var batchNo = 0;
         var inBatch = 0;
         var total = 0;
-        Guid? lastOrderHistoryId = null;
+        var lastOrderHistoryId = Guid.Empty;
         while (true)
         {
-            var pageRead = false;
-            await using (var read = sql.Command(conn, null, RetentionSql.ReadOrphansForPlanningPage,
+            ct.ThrowIfCancellationRequested();
+            var read = 0;
+
+            await using (var cmd = sql.Command(conn, null, RetentionSql.ReadOrphansForPlanningPage,
                             SqlParam.Of("@RunId", run.RunId),
                             SqlParam.Typed("@PageSize", _flushEvery, SqlDbType.Int),
                             SqlParam.Typed("@LastOrderHistoryId", lastOrderHistoryId, SqlDbType.UniqueIdentifier)))
-            await using (var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false))
+            await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    pageRead = true;
                     var id = reader.GetGuid(0);
                     if (inBatch >= run.MaxOrdersPerBatch) { batchNo++; inBatch = 0; }
                     table.Rows.Add(id, batchNo);
                     inBatch++;
                     total++;
+                    read++;
                     lastOrderHistoryId = id;
                 }
             }
+
             if (table.Rows.Count >= _flushEvery)
             {
                 await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
                 table.Clear();
             }
 
-            if (!pageRead)
-                break;
+            if (read < _flushEvery) break;
         }
 
         if (table.Rows.Count > 0)
             await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
         await using (var apply = sql.Command(conn, null, RetentionSql.ApplyOrphanAssignments, SqlParam.Of("@RunId", run.RunId)))
             await apply.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        await using (var init = sql.Command(conn, null, RetentionSql.InitializeOrphanBatchProgress, SqlParam.Of("@RunId", run.RunId)))
+        // Stessa guardia del percorso degli ordini: un dry-run non deve lasciare
+        // slice 'Pending' in RunBatchProgress, che e' la coda di lavoro
+        // dell'esecuzione reale.
+        if (!run.DryRun)
+        {
+            await using var init = sql.Command(conn, null, RetentionSql.InitializeOrphanBatchProgress,
+                SqlParam.Of("@RunId", run.RunId));
             await init.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
         var slices = total == 0 ? 0 : batchNo + 1;
         log.LogInformation("PurgeOrphanPlanningCompleted RunId={RunId} Storici={Count} Slice={Slices}",
             run.RunId, total, slices);
