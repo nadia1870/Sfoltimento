@@ -35,6 +35,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\011_policy_approval.sql" Link="011_policy_approval.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="..\..\db\012_slice_split.sql" Link="012_slice_split.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
 
 <ItemGroup>

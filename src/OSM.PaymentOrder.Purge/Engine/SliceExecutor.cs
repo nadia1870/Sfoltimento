@@ -168,9 +168,19 @@ public sealed class SliceExecutor(
         catch (Exception ex)
         {
             await SafeRollbackAsync(session, ct).ConfigureAwait(false);
-            log.LogError(ex, "PurgeSliceAbandoned RunId={RunId} BatchNo={BatchNo}",
-                run.RunId, slice.BatchNo);
-            return SliceResult.Fatal(ex.Message);
+
+            // Un errore di integrita' — FK violata, chiave duplicata — e' un
+            // dato che rifiuta la cancellazione, non un difetto del programma:
+            // il coordinatore puo' dividere la slice per isolarlo (D-11).
+            // Tutto il resto no: dividere un difetto lo moltiplica soltanto.
+            var splittable = ex is SqlException sqlEx && SqlErrors.IsDataIntegrity(sqlEx);
+
+            log.LogError(ex,
+                "PurgeSliceFailed RunId={RunId} BatchNo={BatchNo} Ordini={Orders} " +
+                "Divisibile={Splittable}",
+                run.RunId, slice.BatchNo, slice.OrderCount, splittable);
+
+            return SliceResult.Fatal(ex.Message, splittable);
         }
         finally
         {

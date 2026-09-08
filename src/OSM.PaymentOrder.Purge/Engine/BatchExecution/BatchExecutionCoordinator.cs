@@ -9,8 +9,8 @@ namespace OSM.PaymentOrder.Purge.Engine.BatchExecution;
 /// Coordina l'esecuzione delle slice di un PurgeRun.
 /// 
 /// Questa classe contiene esclusivamente la politica di esecuzione dei batch:
-/// finestra operativa, recupero della prossima slice, retry, abandon,
-/// metriche e pacing tra le slice. La cancellazione SQL atomica resta
+/// finestra operativa, recupero della prossima slice, retry, bisezione,
+/// abandon, metriche e pacing tra le slice. La cancellazione SQL atomica resta
 /// responsabilità di SliceExecutor.
 /// 
 /// È il seam naturale per una futura implementazione asincrona/distribuita
@@ -124,7 +124,41 @@ public sealed class BatchExecutionCoordinator(
 
                 default:
                     // Un singolo aggregato problematico non deve bloccare
-                    // l'intero sfoltimento.
+                    // l'intero sfoltimento — ne' trascinare con se' gli altri
+                    // della stessa slice. Se il guasto e' un errore di dati la
+                    // slice viene divisa in due (D-11): le meta' buone
+                    // committano, quella cattiva si divide ancora, finche'
+                    // l'abbandono riguarda un aggregato solo.
+                    //
+                    // Le figlie entrano in coda: il ciclo le trovera' con
+                    // GetNextAsync dopo le slice ancora pendenti.
+                    if (result.Splittable && slice.SplitDepth < _options.MaxSplitDepth)
+                    {
+                        var children = await workProvider.SplitAsync(
+                            run.RunId,
+                            slice.BatchNo,
+                            result.Reason,
+                            ct).ConfigureAwait(false);
+
+                        if (children > 0)
+                        {
+                            log.LogWarning(
+                                "PurgeSliceSplit RunId={RunId} BatchNo={BatchNo} Figlie={Children} " +
+                                "Profondita={Depth} Motivo={Reason}",
+                                run.RunId,
+                                slice.BatchNo,
+                                children,
+                                slice.SplitDepth + 1,
+                                result.Reason);
+
+                            metrics.SliceSplit(result.Reason ?? "unknown");
+                            break;
+                        }
+
+                        // Zero figlie: aggregato singolo. Si abbandona, e
+                        // stavolta l'abbandono e' circoscritto al colpevole.
+                    }
+
                     await workProvider.AbandonAsync(
                         run.RunId,
                         slice.BatchNo,

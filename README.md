@@ -16,6 +16,9 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
        002_indexes.sql         indici su PaymentOrder — valutare ONLINE = ON
        003_preflight.sql       verifiche sui dati, DA ESEGUIRE PRIMA
        004_verify_fk.sql       confronto FK reali vs topologia attesa
+       005 .. 012              migrazioni successive a 000: vanno applicate
+                               tutte, in ordine. SchemaVerifier rifiuta di
+                               partire se manca una colonna attesa.
        008_audit_trail.sql     traccia di audit per slice, RICHIESTO
        009_verify_audit.sql    riscontro previsto/effettivo dopo un run
        010_run_lifecycle.sql   fasi del run e contatore interruzioni, RICHIESTO
@@ -66,6 +69,12 @@ Il `GRANT DELETE` va concesso solo dopo l'approvazione del report.
 - Le foreign key `Restrict` non vanno mai disabilitate: sono la rete di
   sicurezza finale.
 - `MaxRowsPerBatch` va tarato sui dati reali (verifica 3 di `003_preflight.sql`).
+- Un collettivo che non si puo' cancellare viene censito in
+  `Purge.RunCandidateCollective` con `State = 'Excluded'` e un motivo, e il
+  run prosegue (D-10). Resta a database finche' qualcuno lo guarda.
+- Una slice che fallisce per un errore di dati viene divisa in due (D-11)
+  finche' l'abbandono riguarda un aggregato solo. La genealogia e' in
+  `Purge.RunBatchProgress.ParentBatchNo`.
 - La paginazione della selezione dipende dagli indici di `002_indexes.sql`:
   senza, il ciclo diventa piu' lento dello statement unico che sostituisce.
   Vedere `docs/decisioni.md`, D-1, prima di modificarla.

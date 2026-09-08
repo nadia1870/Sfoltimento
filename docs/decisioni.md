@@ -307,3 +307,116 @@ misurare, non un evento previsto.
   guardiano restituisce un ambito senza scadenza.
 - `PurgeHousekeeping` continua a usare il token di spegnimento: ha già il
   proprio controllo di finestra fra un lotto e l'altro.
+
+---
+
+## D-10 — Un collettivo anomalo viene escluso in selezione, non fallisce il run
+
+**Contesto.** `SelectEligibleCollectives` verificava solo stato e data dei
+componenti. Un componente referenziato da `Model`, o con uno storico di
+dettaglio che punta a un dettaglio fuori dall'aggregato (C7), entrava nei
+candidati e veniva intercettato in `Validating` da V2 o V1. `Validating` è
+fail-hard: il run andava in `Failed`, terminale, e la notte dopo un run nuovo
+falliva allo stesso punto. Un solo collettivo anomalo bloccava l'intera
+strategia finché qualcuno non correggeva i dati a mano. L'appartenenza
+ambigua faceva lo stesso per un'altra via: `throw` dal `SelectAsync`.
+
+**Decisione.** La selezione collettiva procede in tre tempi: eleggibili,
+esclusioni per motivo, componenti. Le esclusioni sono `UPDATE` idempotenti
+che portano il collettivo da `Selected` a `Excluded` con un `ExcludedReason`
+(`ComponentHasModel`, `AmbiguousMembership`, `CrossRef:<tabella>`), con lo
+stesso schema già usato per `ExecutionDateNull`. I componenti di un collettivo
+escluso non entrano in `RunCandidateOrder`.
+
+**Perché non degradare Validating.** Era la forma ovvia — «scarta e prosegui»
+— ed è sbagliata: `Validating` è la rete di sicurezza contro un difetto della
+selezione, e una rete che scarta in silenzio non è più una rete. Dopo queste
+`UPDATE` un finding in V1/V2 su un run collettivo è un bug, e deve fermare
+tutto come prima. `ValidateOrderBelongsToSingleCollective` resta, ma cambia
+significato: da controllo di dominio a post-condizione di
+`ExcludeAmbiguousCollectives`.
+
+**Conseguenze.**
+
+- Le esclusioni per C7 sono generate da `PurgeTopology.DetailHistoryTables`:
+  una tabella di storico aggiunta alla topologia produce da sola la propria
+  esclusione. `CollectiveExclusionContractTests` verifica che i motivi
+  stiano nei 60 caratteri della colonna.
+- `ExcludeAmbiguousCollectives` esclude *entrambi* i membri della coppia.
+  Funziona perché una singola `UPDATE` legge lo snapshot precedente allo
+  statement. Non è riproducibile nello schema di prova, che ha un indice
+  univoco su `CollectiveOrderGroupOrder.OrderId`; se anche quello reale ce
+  l'ha, l'esclusione non scatterà mai ed è solo difesa.
+- `CountCollectiveAggregate` filtra ora `State = 'Selected'`. Non è
+  ridondante: i collettivi `Excluded` hanno `BatchNo NULL` e nessuna `DELETE`
+  li tocca, ma il conteggio previsionale li includeva già prima per
+  `ExecutionDateNull`, e `vDryRunVsActual` riportava uno scostamento
+  inventato.
+- Il report del dry-run elenca i collettivi esclusi per motivo. Chi approva
+  deve vederlo quanto i conteggi: sono aggregati che restano a database
+  finché qualcuno li guarda.
+- Punto aperto per il business: un componente con `StandingOrder = 1` dentro
+  un collettivo. `TerminatedStrategy` esclude i piani ricorrenti perché la
+  loro soglia è `LastExecutionDate`; `SelectEligibleCollectives` no. Non è
+  stato aggiunto come esclusione perché non è chiaro che il caso esista nel
+  dominio, e un'esclusione al buio nasconderebbe la domanda invece di porla.
+
+---
+
+## D-11 — Una slice che fallisce per un errore di dati si divide, non si abbandona
+
+**Contesto.** `BatchExecutionCoordinator` abbandonava l'intera slice a ogni
+`Fatal`. Il caso tipico è un solo ordine sporco: una riga di storico scritta
+fra `Expanding` ed `Executing`, quindi fuori dal set congelato. La `DELETE`
+del gruppo 2 non la tocca, la `DELETE` su `Order` fallisce con 547, e fino a
+`MaxOrdersPerBatch` ordini restavano a database in `Failed` per una riga sola.
+Nessun run successivo li ripesca senza che qualcuno li guardi.
+
+**Decisione.** Se l'esito è `Fatal` e `Splittable`, il coordinatore chiede a
+`IBatchWorkProvider.SplitAsync` di dividere la slice in due figlie per
+aggregato, che entrano in coda come `Pending` con `BatchNo` nuovi. La madre
+resta come traccia con `Status = 'Split'` e le figlie portano
+`ParentBatchNo` e `SplitDepth`. Le metà buone committano; quella cattiva si
+divide ancora, finché la slice che fallisce contiene un aggregato solo. A quel
+punto `SplitAsync` restituisce zero senza toccare niente, e il coordinatore
+abbandona: l'abbandono è circoscritto al colpevole.
+
+**Perché la bisezione e non i singleton.** Ripianificare in N slice da uno
+è la forma ovvia e costa N transazioni. La bisezione isola un colpevole in
+circa 2·log₂N — diciotto per una slice da cinquecento — perché le metà buone
+non vengono più toccate. Con molti colpevoli degrada verso i singleton, che è
+comunque il comportamento corretto.
+
+**Perché solo per gli errori di dati.** `SqlErrors.IsDataIntegrity` (547,
+2627, 2601) è una lista chiusa, disgiunta da `IsTransient`. Un difetto del
+programma — colonna mancante, permesso negato — fallirebbe ogni figlia, e
+dividerlo produrrebbe 2·N transazioni fallite per scoprire una cosa sola.
+`MaxSplitDepth` è il freno per il caso in cui un difetto si spacci per errore
+di dati; con 2¹⁰ > `MaxOrdersPerBatch` massimo, il default arriva sempre al
+singolo aggregato. Zero ripristina l'abbandono in blocco.
+
+**Conseguenze.**
+
+- L'unità indivisibile è l'aggregato: `COALESCE(CollectiveOrderId, OrderId)`.
+  Un collettivo da tre ordini non si divide, e se è lui il colpevole viene
+  abbandonato intero. È il contratto di `ValidateCollectiveBatchIntegrity`, e
+  `SliceSplitTests` lo prova sul database.
+- Le figlie vanno in coda, non davanti: si finisce il lavoro certo prima di
+  tornare sul dubbio. Una finestra che chiude dopo una split trova le figlie
+  la notte successiva, perché la split è una transazione sola.
+- Il coordinatore non sa quanti aggregati contiene una slice — `OrderCount`
+  non basta, un collettivo ne ha molti — e chiede allo store. È lo store a
+  rispondere zero. `BatchExecutionCoordinatorContractTests` continua a
+  valere: il coordinatore conosce `IBatchWorkProvider`, non `PurgeRunStore`.
+- `AbandonedTotal`, l'housekeeping e `vDryRunVsActual` non cambiano:
+  contano `Abandoned`, e `Split` non lo è. L'audit delle figlie porta i loro
+  `BatchNo`; l'aggregazione per run somma comunque.
+- La domanda «quale aggregato ha ucciso la slice 37» ha ora una risposta:
+  `WHERE ParentBatchNo = 37 AND Status = 'Abandoned'`, e la slice trovata
+  contiene un aggregato solo.
+- `purge.slices_split` è una metrica nuova. Una crescita regolare dice che i
+  dati cambiano fra selezione ed esecuzione più spesso di quanto il disegno
+  assuma, ed è quello il problema da guardare, non la bisezione.
+- Gli storici orfani si dividono per singolo storico, con lo stesso
+  statement: la scelta del ramo la fa `IF EXISTS` su `RunCandidateOrder`,
+  così lo store non deve conoscere la strategia.

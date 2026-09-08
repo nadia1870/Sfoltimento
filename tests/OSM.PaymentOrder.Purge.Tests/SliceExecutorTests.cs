@@ -176,7 +176,7 @@ public sealed class SliceExecutorTests
         Assert.True(session.Disposed);
     }
 
-    /// <summary>Un errore non classificato abbandona la slice.</summary>
+    /// <summary>Un errore non classificato abbandona la slice, e non e' divisibile.</summary>
     [Fact]
     public async Task Un_errore_non_classificato_e_fatale()
     {
@@ -189,8 +189,55 @@ public sealed class SliceExecutorTests
         var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.False(result.Splittable);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
+    }
+
+    /// <summary>
+    /// D-11: una FK violata e' fatale per questa slice, ma e' un dato che
+    /// rifiuta la cancellazione e non un difetto. L'esito lo dichiara
+    /// divisibile, cosi' il coordinatore puo' isolare l'aggregato invece di
+    /// abbandonare tutti quelli che gli stanno accanto. Lo statement
+    /// successivo non parte e il commit non avviene.
+    /// </summary>
+    [Fact]
+    public async Task Una_fk_violata_e_fatale_ma_divisibile()
+    {
+        var session = new FakePurgeSession
+        {
+            FailAtStatement = 3,
+            Failure = SqlExceptionFactory.Create(547, "FK_OrderHistory_Order violata")
+        };
+
+        var result = await Sut(session).ExecuteAsync(Run(), Slice(orderCount: 5), CancellationToken.None);
+
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);
+        Assert.Equal(1, session.Rollbacks);
+        Assert.Equal(0, session.Commits);
+        Assert.Equal(3, session.Executed.Count);
+        Assert.DoesNotContain(session.Executed, s => s.Contains("PurgeAudit"));
+    }
+
+    /// <summary>
+    /// Una SqlException con un numero che non e' ne' transitorio ne' di
+    /// integrita' — un difetto, tipo un oggetto inesistente — resta un
+    /// abbandono in blocco: dividerla fallirebbe ogni figlia allo stesso modo.
+    /// </summary>
+    [Fact]
+    public async Task Una_sqlexception_di_difetto_non_e_divisibile()
+    {
+        var session = new FakePurgeSession
+        {
+            FailAtStatement = 1,
+            Failure = SqlExceptionFactory.Create(208, "oggetto inesistente")
+        };
+
+        var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
+
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.False(result.Splittable);
     }
 
     /// <summary>La cancellazione propaga e non diventa un esito.</summary>

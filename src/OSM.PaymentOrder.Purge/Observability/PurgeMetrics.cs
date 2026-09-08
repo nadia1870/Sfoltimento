@@ -15,6 +15,7 @@ public sealed class PurgeMetrics : IDisposable
     private readonly Counter<long> _rowsDeleted;
     private readonly Counter<long> _slicesCompleted;
     private readonly Counter<long> _slicesAbandoned;
+    private readonly Counter<long> _slicesSplit;
     private readonly Counter<long> _candidatesExcluded;
     private readonly Histogram<double> _sliceDuration;
     private readonly Histogram<int> _sliceRows;
@@ -28,6 +29,7 @@ public sealed class PurgeMetrics : IDisposable
         _rowsDeleted     = _meter.CreateCounter<long>("purge.rows_deleted");
         _slicesCompleted = _meter.CreateCounter<long>("purge.slices_completed");
         _slicesAbandoned = _meter.CreateCounter<long>("purge.slices_abandoned");
+        _slicesSplit     = _meter.CreateCounter<long>("purge.slices_split");
         _candidatesExcluded = _meter.CreateCounter<long>("purge.candidates_excluded");
         _sliceDuration   = _meter.CreateHistogram<double>("purge.slice_duration", "s");
 
@@ -52,6 +54,13 @@ public sealed class PurgeMetrics : IDisposable
 
     public void SliceAbandoned(string reason) =>
         _slicesAbandoned.Add(1, new KeyValuePair<string, object?>("reason", reason));
+
+    /// <summary>
+    /// Bisezioni (D-11). Una crescita regolare dice che i dati cambiano fra
+    /// selezione ed esecuzione piu' spesso di quanto il disegno assuma.
+    /// </summary>
+    public void SliceSplit(string reason) =>
+        _slicesSplit.Add(1, new KeyValuePair<string, object?>("reason", reason));
 
     public void CandidatesExcluded(string reason, long count) =>
         _candidatesExcluded.Add(count, new KeyValuePair<string, object?>("reason", reason));

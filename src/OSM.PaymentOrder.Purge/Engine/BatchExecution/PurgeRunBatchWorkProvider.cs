@@ -21,6 +21,13 @@ public sealed class PurgeRunBatchWorkProvider(PurgeRunStore store) : IBatchWorkP
         CancellationToken ct) =>
         store.AbandonSliceAsync(runId, batchNo, reason, ct);
 
+    public Task<int> SplitAsync(
+        Guid runId,
+        int batchNo,
+        string? reason,
+        CancellationToken ct) =>
+        store.SplitSliceAsync(runId, batchNo, reason, ct);
+
     public Task<int> CountAbandonedAsync(Guid runId, CancellationToken ct) =>
         store.CountAbandonedSlicesAsync(runId, ct);
 

@@ -256,6 +256,9 @@ public sealed class RetentionOrchestratorStateMachineTests(PurgeDatabaseFixture 
         public Task AbandonAsync(Guid runId, int batchNo, string? reason, CancellationToken ct) =>
             Task.CompletedTask;
 
+        public Task<int> SplitAsync(Guid runId, int batchNo, string? reason, CancellationToken ct) =>
+            Task.FromResult(0);
+
         /// <summary>
         /// Nessuna slice abbandonata: questi test provano le transizioni di fase,
         /// non gli esiti dell'esecuzione. Un valore diverso da zero manderebbe ogni

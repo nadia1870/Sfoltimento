@@ -65,6 +65,8 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
         ("Purge.PurgeRun", "InterruptionCount", "010_run_lifecycle.sql"),
         ("Purge.PurgeRun", "LastInterruptedOn", "010_run_lifecycle.sql"),
         ("Purge.PurgeRun", "PolicyHash", "011_policy_approval.sql"),
+        ("Purge.RunBatchProgress", "ParentBatchNo", "012_slice_split.sql"),
+        ("Purge.RunBatchProgress", "SplitDepth", "012_slice_split.sql"),
     ];
 
     private const string ColumnQuery = """

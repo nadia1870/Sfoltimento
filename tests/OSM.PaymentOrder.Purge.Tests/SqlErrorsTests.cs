@@ -45,4 +45,30 @@ public sealed class SqlErrorsTests
         Assert.False(SqlErrors.IsConcurrency(number));
         Assert.False(SqlErrors.IsTransient(number));
     }
+
+    /// <summary>
+    /// D-11: gli errori di integrita' sono divisibili, e sono un insieme
+    /// disgiunto dai transitori. Un 547 non passa riprovando; un deadlock
+    /// non si isola dividendo.
+    /// </summary>
+    [Theory]
+    [InlineData(547)]
+    [InlineData(2627)]
+    [InlineData(2601)]
+    public void Data_integrity_errors_are_splittable_and_not_transient(int number)
+    {
+        Assert.True(SqlErrors.IsDataIntegrity(number));
+        Assert.False(SqlErrors.IsTransient(number));
+        Assert.False(SqlErrors.IsConcurrency(number));
+    }
+
+    [Theory]
+    [InlineData(1205)]   // deadlock
+    [InlineData(10054)]  // connessione azzerata
+    [InlineData(8134)]   // divisione per zero
+    [InlineData(208)]    // oggetto inesistente: un difetto, non un dato
+    public void Everything_else_is_not_splittable(int number)
+    {
+        Assert.False(SqlErrors.IsDataIntegrity(number));
+    }
 }
