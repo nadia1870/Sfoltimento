@@ -2,12 +2,20 @@
    INSTALLAZIONE DELLO SCHEMA Purge — script autonomo
    Database di destinazione: OSM.PaymentOrder
 
-   Crea 8 tabelle di controllo, 1 vista e i relativi indici.
+   Crea 9 tabelle di controllo, 1 vista e i relativi indici.
    NON tocca lo schema PaymentOrder: per gli indici sulle tabelle
    applicative vedere 002_indexes.sql, che va valutato a parte perche'
    opera su tabelle grandi e in uso.
 
-   Idempotente: rieseguibile senza effetti.
+   Idempotente: rieseguibile senza effetti. Su un database gia' installato
+   con una versione precedente aggiunge cio' che manca: la sezione
+   ALLINEAMENTO in fondo ripete le ALTER delle migrazioni 005..012, che
+   restano valide come script separati.
+
+   Questo file DEVE contenere ogni tabella e colonna che SchemaVerifier
+   si aspetta: InstallScriptContractTests lo verifica. Una migrazione
+   nuova va riportata anche qui, altrimenti chi segue il README trova un
+   motore che rifiuta di partire.
    ===================================================================== */
 
 SET NOCOUNT ON;
@@ -46,9 +54,14 @@ BEGIN
         LastError         NVARCHAR(2000)   NULL,
         InterruptionCount INT              NOT NULL
                           CONSTRAINT DF_PurgeRun_Interruptions DEFAULT(0),
-        LastInterruptedOn DATETIMEOFFSET   NULL
+        LastInterruptedOn DATETIMEOFFSET   NULL,
+        StagingPurgedOn   DATETIMEOFFSET   NULL,      -- 005
+        PolicyHash        CHAR(64)         NULL       -- 011
     );
     CREATE NONCLUSTERED INDEX IX_PurgeRun_Phase ON Purge.PurgeRun (Phase, StartedOn);
+    CREATE NONCLUSTERED INDEX IX_PurgeRun_Housekeeping
+        ON Purge.PurgeRun (CompletedOn, StartedOn) INCLUDE (Phase)
+        WHERE StagingPurgedOn IS NULL;
 END
 GO
 
@@ -69,6 +82,9 @@ BEGIN
     );
     CREATE NONCLUSTERED INDEX IX_RCO_Batch
         ON Purge.RunCandidateOrder (RunId, BatchNo) INCLUDE (OrderId, RowWeight, CollectiveOrderId);
+    CREATE NONCLUSTERED INDEX IX_RCO_Collective
+        ON Purge.RunCandidateOrder (RunId, CollectiveOrderId)
+        INCLUDE (OrderId, BatchNo, State, RowWeight);
 END
 GO
 
@@ -124,10 +140,14 @@ BEGIN
         StartedOn         DATETIMEOFFSET   NULL,
         CompletedOn       DATETIMEOFFSET   NULL,
         LastError         NVARCHAR(2000)   NULL,
+        ParentBatchNo     INT              NULL,                                       -- 012
+        SplitDepth        INT              NOT NULL CONSTRAINT DF_RBP_SplitDepth DEFAULT(0), -- 012
         CONSTRAINT PK_RunBatchProgress PRIMARY KEY CLUSTERED (RunId, BatchNo)
     );
     CREATE NONCLUSTERED INDEX IX_RBP_Pending
         ON Purge.RunBatchProgress (RunId, BatchNo) WHERE Status <> 'Completed';
+    CREATE NONCLUSTERED INDEX IX_RBP_Parent
+        ON Purge.RunBatchProgress (RunId, ParentBatchNo) WHERE ParentBatchNo IS NOT NULL;
 END
 GO
 
@@ -178,6 +198,24 @@ BEGIN
 END
 GO
 
+/* --- Approvazione della policy (011) ---------------------------------- */
+IF OBJECT_ID('Purge.PolicyApproval') IS NULL
+BEGIN
+    CREATE TABLE Purge.PolicyApproval
+    (
+        /* La chiave e' la policy, non il run. Cio' che si approva e' cosa
+           verra' cancellato; il dry-run e' la prova che e' stato guardato. */
+        PolicyHash   CHAR(64)         NOT NULL
+                     CONSTRAINT PK_PolicyApproval PRIMARY KEY,
+        DryRunRunId  UNIQUEIDENTIFIER NOT NULL,
+        ApprovedOn   DATETIMEOFFSET   NOT NULL,
+        ApprovedBy   NVARCHAR(200)    NOT NULL,
+        PolicyText   NVARCHAR(1000)   NOT NULL,
+        Note         NVARCHAR(1000)   NULL
+    );
+END
+GO
+
 /* L'audit e' append-only, con una riga per (RunId, BatchNo, tabella):
    l'aggregazione per run la fa la view.                                  */
 IF OBJECT_ID('Purge.vDryRunVsActual') IS NOT NULL DROP VIEW Purge.vDryRunVsActual;
@@ -194,6 +232,59 @@ LEFT JOIN (
     FROM Purge.PurgeAudit
     GROUP BY RunId, TableName
 ) AS a ON a.RunId = d.RunId AND a.TableName = d.TableName;
+GO
+
+/* =====================================================================
+   ALLINEAMENTO di un'installazione precedente
+   Le CREATE TABLE sopra non toccano una tabella che esiste gia'. Queste
+   ALTER sono le stesse delle migrazioni 005..012 e portano una base
+   vecchia allo schema corrente. Su un'installazione nuova non fanno nulla.
+   ===================================================================== */
+IF COL_LENGTH('Purge.PurgeRun', 'StagingPurgedOn') IS NULL
+    ALTER TABLE Purge.PurgeRun ADD StagingPurgedOn DATETIMEOFFSET NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PurgeRun_Housekeeping'
+               AND object_id = OBJECT_ID('Purge.PurgeRun'))
+    CREATE NONCLUSTERED INDEX IX_PurgeRun_Housekeeping
+        ON Purge.PurgeRun (CompletedOn, StartedOn) INCLUDE (Phase)
+        WHERE StagingPurgedOn IS NULL;
+GO
+IF COL_LENGTH('Purge.RunCandidateOrder', 'CollectiveOrderId') IS NULL
+    ALTER TABLE Purge.RunCandidateOrder ADD CollectiveOrderId UNIQUEIDENTIFIER NULL;
+GO
+IF COL_LENGTH('Purge.RunCandidateCollective', 'BatchNo') IS NULL
+    ALTER TABLE Purge.RunCandidateCollective ADD BatchNo INT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_RCO_Collective'
+               AND object_id = OBJECT_ID('Purge.RunCandidateOrder'))
+    CREATE NONCLUSTERED INDEX IX_RCO_Collective
+        ON Purge.RunCandidateOrder (RunId, CollectiveOrderId)
+        INCLUDE (OrderId, BatchNo, State, RowWeight);
+GO
+IF COL_LENGTH('Purge.PurgeAudit', 'BatchNo') IS NULL
+    ALTER TABLE Purge.PurgeAudit ADD BatchNo INT NULL;
+GO
+IF COL_LENGTH('Purge.PurgeRun', 'InterruptionCount') IS NULL
+    ALTER TABLE Purge.PurgeRun ADD InterruptionCount INT NOT NULL
+        CONSTRAINT DF_PurgeRun_Interruptions DEFAULT(0);
+GO
+IF COL_LENGTH('Purge.PurgeRun', 'LastInterruptedOn') IS NULL
+    ALTER TABLE Purge.PurgeRun ADD LastInterruptedOn DATETIMEOFFSET NULL;
+GO
+IF COL_LENGTH('Purge.PurgeRun', 'PolicyHash') IS NULL
+    ALTER TABLE Purge.PurgeRun ADD PolicyHash CHAR(64) NULL;
+GO
+IF COL_LENGTH('Purge.RunBatchProgress', 'ParentBatchNo') IS NULL
+    ALTER TABLE Purge.RunBatchProgress ADD ParentBatchNo INT NULL;
+GO
+IF COL_LENGTH('Purge.RunBatchProgress', 'SplitDepth') IS NULL
+    ALTER TABLE Purge.RunBatchProgress
+        ADD SplitDepth INT NOT NULL CONSTRAINT DF_RBP_SplitDepth DEFAULT(0);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_RBP_Parent'
+               AND object_id = OBJECT_ID('Purge.RunBatchProgress'))
+    CREATE NONCLUSTERED INDEX IX_RBP_Parent
+        ON Purge.RunBatchProgress (RunId, ParentBatchNo) WHERE ParentBatchNo IS NOT NULL;
 GO
 
 /* =====================================================================
@@ -219,7 +310,7 @@ GO
 
 /* =====================================================================
    VERIFICA
-   Attesi: 8 tabelle, 1 vista. Se il conteggio non torna, lo script non
+   Attesi: 9 tabelle, 1 vista. Se il conteggio non torna, lo script non
    e' andato a buon fine e il motore fallira' all'avvio.
    ===================================================================== */
 SELECT
@@ -234,7 +325,7 @@ ORDER BY o.type_desc, o.name;
 SELECT
     Tabelle = SUM(CASE WHEN o.type = 'U' THEN 1 ELSE 0 END),
     Viste   = SUM(CASE WHEN o.type = 'V' THEN 1 ELSE 0 END),
-    Esito   = CASE WHEN SUM(CASE WHEN o.type = 'U' THEN 1 ELSE 0 END) = 8
+    Esito   = CASE WHEN SUM(CASE WHEN o.type = 'U' THEN 1 ELSE 0 END) = 9
                     AND SUM(CASE WHEN o.type = 'V' THEN 1 ELSE 0 END) = 1
                    THEN 'OK' ELSE 'INCOMPLETO' END
 FROM sys.objects o

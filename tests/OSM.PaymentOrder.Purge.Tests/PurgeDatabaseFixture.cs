@@ -152,14 +152,48 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         return services.BuildServiceProvider();
     }
 
-    private async Task RunScriptAsync(string fileName)
+    /// <summary>
+    /// Esegue un corpo su un database vuoto e separato, creato con i soli
+    /// script indicati e distrutto alla fine. Serve a provare l'installazione
+    /// da zero, che sul database della sessione — gia' migrato — non e'
+    /// osservabile: uno script incompleto passerebbe perche' le colonne ci
+    /// sono gia'.
+    /// </summary>
+    public async Task OnFreshDatabaseAsync(
+        IReadOnlyList<string> scripts, Func<SqlExecutor, Task> body)
+    {
+        var name = $"PaymentOrder_Install_{Guid.NewGuid():N}"[..40];
+        await ExecuteOnMasterAsync(
+            $"CREATE DATABASE [{name}] COLLATE SQL_Latin1_General_CP1_CI_AS;");
+
+        var cs = new SqlConnectionStringBuilder(MasterConnection) { InitialCatalog = name }
+            .ConnectionString;
+
+        try
+        {
+            foreach (var script in scripts)
+                await RunScriptAsync(script, cs);
+
+            await body(new SqlExecutor(cs));
+        }
+        finally
+        {
+            await ExecuteOnMasterAsync(
+                $"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; " +
+                $"DROP DATABASE [{name}];");
+        }
+    }
+
+    private Task RunScriptAsync(string fileName) => RunScriptAsync(fileName, ConnectionString);
+
+    private static async Task RunScriptAsync(string fileName, string connectionString)
     {
         var path = Path.Combine(AppContext.BaseDirectory, fileName);
         var text = await File.ReadAllTextAsync(path);
         var batches = Regex.Split(text, @"^\s*GO\s*$",
             RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
-        await using var conn = new SqlConnection(ConnectionString);
+        await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
 
         foreach (var batch in batches.Where(b => !string.IsNullOrWhiteSpace(b)))

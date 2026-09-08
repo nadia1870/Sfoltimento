@@ -16,9 +16,10 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
        002_indexes.sql         indici su PaymentOrder — valutare ONLINE = ON
        003_preflight.sql       verifiche sui dati, DA ESEGUIRE PRIMA
        004_verify_fk.sql       confronto FK reali vs topologia attesa
-       005 .. 012              migrazioni successive a 000: vanno applicate
-                               tutte, in ordine. SchemaVerifier rifiuta di
-                               partire se manca una colonna attesa.
+       005 .. 012              migrazioni incrementali. 000 le contiene tutte
+                               (InstallScriptContractTests lo verifica): servono
+                               solo per aggiornare un database gia' installato
+                               un passo alla volta.
        008_audit_trail.sql     traccia di audit per slice, RICHIESTO
        009_verify_audit.sql    riscontro previsto/effettivo dopo un run
        010_run_lifecycle.sql   fasi del run e contatore interruzioni, RICHIESTO
@@ -31,8 +32,6 @@ src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
 
 ```bash
 sqlcmd -S <host>,<porta> -d <database> -i db/000_install_purge.sql
-sqlcmd -S <host>,<porta> -d <database> -i db/008_audit_trail.sql
-sqlcmd -S <host>,<porta> -d <database> -i db/010_run_lifecycle.sql
 sqlcmd -S <host>,<porta> -d <database> -i db/003_preflight.sql
 
 dotnet run --project src/OSM.PaymentOrder.Purge.Host              # servizio con cron
@@ -90,6 +89,10 @@ Il `GRANT DELETE` va concesso solo dopo l'approvazione del report.
 `db/009_verify_audit.sql` confronta la traccia di audit con i checkpoint e con
 il previsionale. Il primo dei suoi controlli e' quello che conta: se l'audit e
 il checkpoint divergono, uno dei due mente e nessuno dei due e' utilizzabile.
+
+## Storia delle versioni
+
+`docs/changelog/`. Le scelte non ovvie sono in `docs/decisioni.md`.
 
 ## Punti aperti
 

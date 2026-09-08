@@ -56,7 +56,13 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
     /// tabella non le vedrebbe: mancherebbero al primo INSERT, a meta' della
     /// prima slice, con la transazione gia' aperta sulle tabelle di dominio.
     /// </summary>
-    private static readonly (string Table, string Column, string Script)[] ExpectedColumns =
+    /// <remarks>
+    /// Interna, non privata: InstallScriptContractTests verifica che ogni
+    /// colonna elencata qui compaia anche in 000_install_purge.sql. E' la
+    /// deriva che lo script ha gia' avuto una volta, e il modo in cui si
+    /// manifestava era un motore che rifiuta di partire a chi segue il README.
+    /// </remarks>
+    internal static readonly (string Table, string Column, string Script)[] ExpectedColumns =
     [
         ("Purge.PurgeRun", "StagingPurgedOn", "005_housekeeping.sql"),
         ("Purge.RunCandidateOrder", "CollectiveOrderId", "006_collective_atomicity.sql"),

@@ -23,6 +23,8 @@
 
   <ItemGroup>
     <None Update="010_test_schema.sql"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="..\..\db\000_install_purge.sql" Link="000_install_purge.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\001_purge_schema.sql" Link="001_purge_schema.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\005_housekeeping.sql" Link="005_housekeeping.sql">
