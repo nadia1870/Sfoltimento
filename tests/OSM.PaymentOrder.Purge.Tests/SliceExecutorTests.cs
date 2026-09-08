@@ -190,6 +190,7 @@ public sealed class SliceExecutorTests
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
         Assert.False(result.Splittable);
+        Assert.Equal(nameof(InvalidOperationException), result.Reason);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
     }
@@ -214,6 +215,8 @@ public sealed class SliceExecutorTests
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
         Assert.True(result.Splittable);
+        // Codice, non messaggio: e' un tag di metrica e una chiave di log.
+        Assert.Equal("Sql547", result.Reason);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
         Assert.Equal(3, session.Executed.Count);
@@ -325,21 +328,27 @@ public sealed class SliceExecutorTests
     /// <summary>
     /// Un rollback fallito non deve coprire l'errore originale: e' quello che
     /// interessa a chi legge il log la mattina dopo.
+    ///
+    /// Il motivo e' un codice — numero SQL o nome del tipo — quindi le due
+    /// eccezioni devono essere di tipo diverso perche' l'assert distingua
+    /// davvero l'originale dal rollback. La prima e' una FK violata, come nel
+    /// caso reale; la seconda e' un tipo che il motore non tratta mai.
     /// </summary>
     [Fact]
     public async Task Un_rollback_fallito_non_copre_l_errore_originale()
     {
-        var originale = new InvalidOperationException("causa vera");
         var session = new FakePurgeSession
         {
             FailAtStatement = 1,
-            Failure = originale,
-            RollbackFailure = new InvalidOperationException("anche il rollback")
+            Failure = SqlExceptionFactory.Create(547, "causa vera"),
+            RollbackFailure = new NotSupportedException("anche il rollback")
         };
 
         var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
-        Assert.Equal(originale.Message, result.Reason);
+        Assert.Equal("Sql547", result.Reason);
+        Assert.True(result.Splittable);   // classificata sull'originale, non sul rollback
+        Assert.NotEqual(nameof(NotSupportedException), result.Reason);
     }
 }

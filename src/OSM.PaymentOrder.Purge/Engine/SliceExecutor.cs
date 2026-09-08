@@ -183,12 +183,20 @@ public sealed class SliceExecutor(
             // Tutto il resto no: dividere un difetto lo moltiplica soltanto.
             var splittable = ex is SqlException sqlEx && SqlErrors.IsDataIntegrity(sqlEx);
 
+            // Il motivo e' un codice corto, non il messaggio: finisce nel tag
+            // "reason" delle metriche, in RunBatchProgress.LastError e nella
+            // riga PurgeSliceSplit del coordinatore. Un messaggio di SQL
+            // Server — con nome del database, tabella e due righe di testo —
+            // rende il tag a cardinalita' illimitata e il log illeggibile. Il
+            // testo completo sta qui sotto, una volta, insieme allo stack.
+            var reason = ex is SqlException s ? $"Sql{s.Number}" : ex.GetType().Name;
+
             log.LogError(ex,
                 "PurgeSliceFailed RunId={RunId} BatchNo={BatchNo} Ordini={Orders} " +
-                "Divisibile={Splittable}",
-                run.RunId, slice.BatchNo, slice.OrderCount, splittable);
+                "Motivo={Reason} Divisibile={Splittable}",
+                run.RunId, slice.BatchNo, slice.OrderCount, reason, splittable);
 
-            return SliceResult.Fatal(ex.Message, splittable);
+            return SliceResult.Fatal(reason, splittable);
         }
         finally
         {
