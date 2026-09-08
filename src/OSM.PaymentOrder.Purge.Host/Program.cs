@@ -18,6 +18,7 @@ public static class Program
     /// Due modalita':
     ///   purge once --dry-run [strat]   simulazione, nessuna cancellazione
     ///   purge once --delete  [strat]   esecuzione reale
+    ///   ... --no-window                ignora la chiusura della finestra
     ///   purge approve <run-id> --by <nome> [--note <testo>]
     ///   purge  (senza once)            servizio con cronjob interno,
     ///                                  dry-run per costruzione
@@ -31,8 +32,10 @@ public static class Program
     /// Indovinare l'intenzione, su un comando che cancella dati, e'
     /// precisamente cio' che non si deve fare.
     ///
-    /// La modalita' 'once' ignora la finestra oraria: e' lo scheduler esterno
-    /// a decidere quando eseguire.
+    /// La finestra operativa resta attiva anche in modalita' 'once'. Lo
+    /// scheduler esterno decide quando partire; la configurazione continua a
+    /// decidere quando smettere di prendere nuove slice. Per rinunciarvi serve
+    /// --no-window, esplicito.
     /// </summary>
     public static async Task<int> Main(string[] args)
     {
@@ -187,6 +190,12 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Rinuncia al limite di fine della finestra operativa. Esplicito di
+    /// proposito: serve a un recupero o a un collaudo, non alla notte normale.
+    /// </summary>
+    public const string NoWindowFlag = "--no-window";
+
     private static string? ValoreOpzione(string[] args, string nome)
     {
         var i = Array.FindIndex(args, a => a.Equals(nome, StringComparison.OrdinalIgnoreCase));
@@ -293,8 +302,58 @@ public static class Program
         var options = host.Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
         var clock = host.Services.GetRequiredService<TimeProvider>();
 
-        // Lo scheduler esterno decide quando eseguire: la finestra non si applica.
-        options.WindowEnabled = false;
+        // La finestra operativa resta attiva anche in modalita' once.
+        //
+        // Qui c'era una disattivazione incondizionata, motivata dal fatto che
+        // e' lo scheduler esterno a decidere quando eseguire. La motivazione
+        // copriva pero' meta' del problema: la finestra decide *quando
+        // partire*, e questo lo fa UC4, ma decide anche *quando fermarsi*, e
+        // quello non lo fa nessun altro.
+        //
+        // Con la disattivazione, un run piu' lungo del previsto proseguiva
+        // nella mattina lavorativa in concorrenza con l'operativita'. Il
+        // pacing fra le slice, la priorita' bassa sui deadlock e le
+        // transazioni corte servono a convivere con l'OLTP *dentro* una
+        // finestra notturna: fuori riducono il danno, non lo evitano.
+        //
+        // Rinunciare al limite di fine deve restare possibile — un recupero,
+        // un collaudo — ma come richiesta esplicita, non come effetto
+        // collaterale della modalita' di avvio.
+        var senzaFinestra = args.Any(
+            a => a.Equals(NoWindowFlag, StringComparison.OrdinalIgnoreCase));
+
+        if (senzaFinestra)
+        {
+            options.WindowEnabled = false;
+            log.LogWarning(
+                "PurgeWindowDisabled: {Flag} richiesto esplicitamente. L'esecuzione " +
+                "non si fermera' alla chiusura della finestra operativa.", NoWindowFlag);
+        }
+        else if (options.WindowEnabled)
+        {
+            log.LogInformation(
+                "Finestra operativa attiva: {Start}-{End}. Nessuna nuova slice verra' " +
+                "avviata dopo la chiusura.", options.WindowStart, options.WindowEnd);
+        }
+
+        // Riattivare la finestra apre un caso che prima non esisteva: UC4
+        // pianificato a un'ora fuori dalla finestra configurata. Il
+        // coordinatore si fermerebbe alla prima verifica e il processo
+        // uscirebbe con zero senza aver fatto niente — un job verde che non
+        // ha cancellato nulla, che e' il modo peggiore di sbagliare.
+        //
+        // Le due configurazioni sono in disaccordo e qualcuno deve saperlo.
+        if (options.WindowEnabled && !options.IsWithinWindow(clock.GetLocalNow()))
+        {
+            log.LogError(
+                "PurgeOutsideWindow: avvio alle {Now:HH:mm} fuori dalla finestra " +
+                "{Start}-{End}. La pianificazione dello scheduler e la finestra " +
+                "configurata non concordano: allinearle, oppure usare {Flag} se " +
+                "l'esecuzione fuori orario e' voluta.",
+                clock.GetLocalNow(), options.WindowStart, options.WindowEnd, NoWindowFlag);
+
+            return 4;
+        }
 
         var strategies = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)
                          && Enum.TryParse<RetentionStrategy>(args[1], true, out var s)
