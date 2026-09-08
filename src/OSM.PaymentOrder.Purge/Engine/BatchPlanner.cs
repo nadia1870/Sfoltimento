@@ -29,25 +29,28 @@ public sealed class BatchPlanner(
     SqlExecutor sql,
     PurgeStrategyResolver strategyResolver,
     ILogger<BatchPlanner> log,
-    int flushEvery = 50_000)
+    int flushEvery = 50_000,
+    int bulkCopyTimeoutSeconds = 300)
 {
     private readonly int _flushEvery = flushEvery > 0
         ? flushEvery
         : throw new ArgumentOutOfRangeException(nameof(flushEvery));
+
+    private readonly int _bulkCopyTimeoutSeconds = bulkCopyTimeoutSeconds >= 0
+        ? bulkCopyTimeoutSeconds
+        : throw new ArgumentOutOfRangeException(nameof(bulkCopyTimeoutSeconds));
 
     public async Task<int> PlanAsync(PurgeRun run, CancellationToken ct)
     {
         var strategy = strategyResolver.Resolve(run.Strategy);
         if (strategy.PlanningMode == PurgePlanningMode.OrphanHistory)
             return await PlanOrphansAsync(run, ct).ConfigureAwait(false);
-
         await using var conn = await sql.OpenAsync(ct).ConfigureAwait(false);
         await using (var create = sql.Command(conn, null, RetentionSql.CreateAssignmentTempTable))
             await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
         var buffer = NewTable();
         var packer = new BatchPacker(run.MaxRowsPerBatch, run.MaxOrdersPerBatch);
-
         void AddAssignments(IReadOnlyList<BatchPacker.Assignment> assignments)
         {
             foreach (var assignment in assignments)
@@ -57,7 +60,6 @@ public sealed class BatchPlanner(
             }
 
         }
-
         // Il DataReader non puo' restare aperto mentre SqlBulkCopy usa la stessa
         // SqlConnection. Leggiamo quindi pagine keyset: ogni reader viene chiuso
         // prima del flush e poi la lettura riparte dall'ultima chiave ordinata.
@@ -69,7 +71,6 @@ public sealed class BatchPlanner(
         while (true)
         {
             var pageRead = false;
-
             await using (var read = sql.Command(conn, null,
                             RetentionSql.ReadCandidatesForPlanningPage,
                             SqlParam.Of("@RunId", run.RunId),
@@ -87,7 +88,6 @@ public sealed class BatchPlanner(
                         reader.GetGuid(0),
                         reader.IsDBNull(1) ? 1 : reader.GetInt32(1),
                         reader.IsDBNull(2) ? null : reader.GetGuid(2));
-
                     AddAssignments(packer.Add(candidate));
 
                     hasAnchor = true;
@@ -96,7 +96,6 @@ public sealed class BatchPlanner(
                     lastSortGroup = candidate.CollectiveOrderId.HasValue ? 1 : 0;
                 }
             }
-
             // Il reader e' gia' stato disposed: da questo punto SqlBulkCopy puo'
             // usare in sicurezza la stessa connection e le #temp table di sessione.
             if (buffer.Rows.Count >= _flushEvery)
@@ -110,14 +109,12 @@ public sealed class BatchPlanner(
         }
 
         AddAssignments(packer.Complete());
-
         if (buffer.Rows.Count > 0)
             await FlushAsync(conn, buffer, ct).ConfigureAwait(false);
 
         await using (var apply = sql.Command(conn, null, RetentionSql.ApplyAssignments,
                         SqlParam.Of("@RunId", run.RunId)))
             await apply.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
         if (!run.DryRun)
         {
             await using var init = sql.Command(conn, null, RetentionSql.InitializeBatchProgress,
@@ -126,13 +123,11 @@ public sealed class BatchPlanner(
         }
 
         var sliceCount = packer.SliceCount;
-
         log.LogInformation(
             "PurgePlanningCompleted RunId={RunId} Ordini={Orders} Slice={Slices} " +
             "Oversized={Oversized} MaxRighe={MaxRows} MaxOrdini={MaxOrders} CollectiveAtomic={CollectiveAtomic}",
             run.RunId, packer.Total, sliceCount, packer.OversizedCount, run.MaxRowsPerBatch, run.MaxOrdersPerBatch,
             run.Strategy == RetentionStrategy.Collective);
-
         if (packer.OversizedCount > 0)
         {
             log.LogWarning(
@@ -148,14 +143,12 @@ public sealed class BatchPlanner(
         await using var conn = await sql.OpenAsync(ct).ConfigureAwait(false);
         await using (var create = sql.Command(conn, null, RetentionSql.CreateOrphanAssignmentTempTable))
             await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
         var table = new DataTable();
         table.Columns.Add("OrderHistoryId", typeof(Guid));
         table.Columns.Add("BatchNo", typeof(int));
         var batchNo = 0;
         var inBatch = 0;
         var total = 0;
-
         Guid? lastOrderHistoryId = null;
         while (true)
         {
@@ -177,7 +170,6 @@ public sealed class BatchPlanner(
                     lastOrderHistoryId = id;
                 }
             }
-
             if (table.Rows.Count >= _flushEvery)
             {
                 await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
@@ -190,21 +182,23 @@ public sealed class BatchPlanner(
 
         if (table.Rows.Count > 0)
             await FlushOrphansAsync(conn, table, ct).ConfigureAwait(false);
-
         await using (var apply = sql.Command(conn, null, RetentionSql.ApplyOrphanAssignments, SqlParam.Of("@RunId", run.RunId)))
             await apply.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         await using (var init = sql.Command(conn, null, RetentionSql.InitializeOrphanBatchProgress, SqlParam.Of("@RunId", run.RunId)))
             await init.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
         var slices = total == 0 ? 0 : batchNo + 1;
         log.LogInformation("PurgeOrphanPlanningCompleted RunId={RunId} Storici={Count} Slice={Slices}",
             run.RunId, total, slices);
         return slices;
     }
 
-    private static async Task FlushOrphansAsync(SqlConnection conn, DataTable table, CancellationToken ct)
+    private async Task FlushOrphansAsync(SqlConnection conn, DataTable table, CancellationToken ct)
     {
-        using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "#assignOrphan" };
+        using var bulk = new SqlBulkCopy(conn)
+        {
+            DestinationTableName = "#assignOrphan",
+            BulkCopyTimeout = _bulkCopyTimeoutSeconds
+        };
         bulk.ColumnMappings.Add("OrderHistoryId", "OrderHistoryId");
         bulk.ColumnMappings.Add("BatchNo", "BatchNo");
         await bulk.WriteToServerAsync(table, ct).ConfigureAwait(false);
@@ -220,9 +214,13 @@ public sealed class BatchPlanner(
         return t;
     }
 
-    private static async Task FlushAsync(SqlConnection conn, DataTable table, CancellationToken ct)
+    private async Task FlushAsync(SqlConnection conn, DataTable table, CancellationToken ct)
     {
-        using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "#assign" };
+        using var bulk = new SqlBulkCopy(conn)
+        {
+            DestinationTableName = "#assign",
+            BulkCopyTimeout = _bulkCopyTimeoutSeconds
+        };
         bulk.ColumnMappings.Add("OrderId", "OrderId");
         bulk.ColumnMappings.Add("BatchNo", "BatchNo");
         bulk.ColumnMappings.Add("IsOversized", "IsOversized");
