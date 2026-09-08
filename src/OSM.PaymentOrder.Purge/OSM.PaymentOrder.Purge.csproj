@@ -14,6 +14,7 @@
   <ItemGroup>
     <!-- Migrazioni tracciate dello schema Purge (D-13). Solo SqlServer:
          il core arriva transitivamente. -->
+    <PackageReference Include="Dapper" Version="2.1.66" />
     <PackageReference Include="dbup-sqlserver" Version="5.0.41" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />

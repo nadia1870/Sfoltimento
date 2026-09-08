@@ -513,3 +513,48 @@ qui:
   così uno scheduler può usarlo come controllo.
 - La guardia sul nome del database (`PaymentOrder`) è la stessa di `000`.
   La fixture la disattiva per nome, non per caso.
+
+---
+
+## D-14 — Dapper dentro il livello dati, con la mappa `datetime2` come prima cosa
+
+**Contesto.** `SqlExecutor` e `SqlSession` costruivano i comandi a mano e
+leggevano per **posizione**: `r.GetInt32(5)`. Aggiungere `SplitDepth` a
+`NextPendingSlice` (D-11) ha richiesto di toccare la query *e* l'indice nello
+store; invertire due colonne sarebbe stato un bug silenzioso.
+
+**Decisione.** Dapper vive dentro `SqlExecutor` e `SqlSession`. `ISqlExecutor`
+e `IPurgeSession` non cambiano: i fake dei test restano identici, e
+`SliceExecutor` non sa che esiste. Le letture di produzione passano a
+`QueryAsync<T>`, mappato per nome su un `record` i cui parametri portano il
+nome delle colonne.
+
+**La mappa `DateTime → DbType.DateTime2` viene prima di tutto il resto.**
+Dapper, come `AddWithValue`, manda un `DateTime` come `SqlDbType.DateTime`,
+il cui minimo è il 1753. La filigrana della selezione paginata parte da
+`DateTime.MinValue`: senza la mappa, il valore verrebbe rifiutato dal client
+prima ancora di raggiungere il server, e la selezione si fermerebbe alla
+prima pagina. Era la ragione d'essere di `SqlParam.Typed`, che resta
+necessario per un'altra: un parametro **NULL** non ha un tipo deducibile dal
+valore.
+
+**Conseguenze.**
+
+- Le query di produzione devono dare un **alias** a ogni colonna calcolata:
+  `COUNT_BIG(*)` senza alias non ha un nome su cui mappare. Il rischio si
+  sposta da "colonna sbagliata in silenzio" a "proprietà a zero", che è
+  peggio se non ci si pensa — per questo `CountExcludedCollectivesByReason`
+  ha guadagnato `Collectives = COUNT_BIG(*)`, e per questo i record di riga
+  sono `private` accanto al metodo che li usa, dove si vedono insieme alla
+  query.
+- La conversione degli enum resta esplicita in `PurgeRunStore`: arrivano
+  come stringa e vengono convertiti in `ToDomain()`, così un valore
+  sconosciuto fallisce dicendo quale run lo contiene.
+- `QueryAsync(map)` posizionale resta su `ISqlExecutor` per i test e le
+  letture ad hoc, dove la query e la lambda si leggono a due righe di
+  distanza.
+- `SqlBulkCopy` in `BatchPlanner`, `DEADLOCK_PRIORITY LOW`, la transazione
+  esplicita, `READ COMMITTED` e i batch multi-statement non cambiano: Dapper
+  esegue ciò che gli si dà, e la politica del purge resta dove era.
+- `ScalarAsync<T>` delega a `ExecuteScalarAsync<T>`, che conserva il
+  comportamento precedente: NULL dal server diventa `default(T)`.

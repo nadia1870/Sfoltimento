@@ -1,4 +1,5 @@
 using System.Data;
+using Dapper;
 using Microsoft.Data.SqlClient;
 
 namespace OSM.PaymentOrder.Purge.Data;
@@ -60,41 +61,16 @@ internal sealed class SqlSession : IPurgeSession
         return new SqlSession(conn, tx, timeoutSeconds);
     }
 
-    private SqlCommand Command(string sql, SqlParam[] parameters)
-    {
-        var cmd = _conn.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.CommandTimeout = _timeoutSeconds;
-        cmd.Transaction = _tx;
-
-        foreach (var p in parameters)
-        {
-            if (p.Type is { } type)
-                cmd.Parameters.Add(p.Name, type).Value = p.Value ?? DBNull.Value;
-            else
-                cmd.Parameters.AddWithValue(p.Name, p.Value ?? DBNull.Value);
-        }
-
-        return cmd;
-    }
+    private CommandDefinition Define(string sql, SqlParam[] parameters, CancellationToken ct) =>
+        new(sql, SqlParam.ToDapper(parameters), _tx, _timeoutSeconds, cancellationToken: ct);
 
     public async Task<int> ExecuteAsync(string sql, CancellationToken ct,
-                                        params SqlParam[] parameters)
-    {
-        await using var cmd = Command(sql, parameters);
-        return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-    }
+                                        params SqlParam[] parameters) =>
+        await _conn.ExecuteAsync(Define(sql, parameters, ct)).ConfigureAwait(false);
 
     public async Task<T?> ScalarAsync<T>(string sql, CancellationToken ct,
-                                         params SqlParam[] parameters)
-    {
-        await using var cmd = Command(sql, parameters);
-        var value = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-
-        if (value is null || value == DBNull.Value) return default;
-        if (value is T typed) return typed;
-        return (T)Convert.ChangeType(value, typeof(T));
-    }
+                                         params SqlParam[] parameters) =>
+        await _conn.ExecuteScalarAsync<T>(Define(sql, parameters, ct)).ConfigureAwait(false);
 
     public async Task CommitAsync(CancellationToken ct)
     {
