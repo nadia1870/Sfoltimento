@@ -16,19 +16,91 @@ public static class Program
 {
     /// <summary>
     /// Due modalita':
-    ///   dotnet run                  servizio con cronjob interno
-    ///   dotnet run -- once [strat]  esecuzione singola, per scheduler esterno
-    ///                               (Task Scheduler, cron di sistema, k8s CronJob)
+    ///   purge once --dry-run [strat]   simulazione, nessuna cancellazione
+    ///   purge once --delete  [strat]   esecuzione reale
+    ///   purge approve <run-id> --by <nome> [--note <testo>]
+    ///   purge  (senza once)            servizio con cronjob interno,
+    ///                                  dry-run per costruzione
+    ///
+    /// La modalita' e' obbligatoria e arriva dalla riga di comando, mai dalla
+    /// configurazione. In produzione UC4 espone due job distinti,
+    /// PURGE_DRY_RUN e PURGE_DELETE, cosi' la modalita' e' una proprieta' del
+    /// job invece di un parametro che qualcuno modifica.
+    ///
+    /// Senza modalita' il comando non esegue niente ed esce con codice 2.
+    /// Indovinare l'intenzione, su un comando che cancella dati, e'
+    /// precisamente cio' che non si deve fare.
     ///
     /// La modalita' 'once' ignora la finestra oraria: e' lo scheduler esterno
     /// a decidere quando eseguire.
     /// </summary>
     public static async Task<int> Main(string[] args)
     {
-        var once = args.Length > 0 &&
-                   args[0].Equals("once", StringComparison.OrdinalIgnoreCase);
+        var comando = args.Length > 0 ? args[0].ToLowerInvariant() : string.Empty;
+
+        if (comando == "approve")
+        {
+            using var approvazione = BuildHost(args, once: true);
+            return await ApproveAsync(approvazione, args).ConfigureAwait(false);
+        }
+
+        var once = comando == "once";
+
+        // La modalita' servizio e' dry-run per costruzione.
+        //
+        // Non ha una riga di comando per esecuzione: il cron interno decide da
+        // se' quando partire, e nessuno autorizza le singole notti. Dare a
+        // quel percorso la capacita' di cancellare significherebbe che la
+        // modalita' torna a vivere in configurazione, cioe' esattamente il
+        // buco che questi flag chiudono.
+        //
+        // Chiedere --delete qui non fa degradare in silenzio a simulazione: un
+        // servizio che si crede in cancellazione e invece simula e' lo stesso
+        // errore dell'uscita con codice zero senza aver fatto niente. Si
+        // rifiuta di partire e indica il percorso giusto.
+        PurgeExecutionMode mode;
+
+        if (!once)
+        {
+            if (PurgeExecutionModeParser.Parse(args) == PurgeExecutionMode.Delete)
+            {
+                Console.Error.WriteLine(
+                    "La modalita' servizio non puo' cancellare: e' dry-run per costruzione. " +
+                    "Per un'esecuzione reale usare 'purge once --delete', pianificata da UC4.");
+                return 2;
+            }
+
+            mode = PurgeExecutionMode.DryRun;
+        }
+        else
+        {
+            var richiesta = PurgeExecutionModeParser.Parse(args);
+            if (richiesta is null)
+            {
+                Console.Error.WriteLine(PurgeExecutionModeParser.Usage);
+                return 2;
+            }
+
+            mode = richiesta.Value;
+        }
 
         using var host = BuildHost(args, once);
+
+        // La configurazione non decide piu' la modalita': la sovrascrive la
+        // riga di comando. Purge:DryRun in appsettings resta solo come default
+        // di sviluppo e in produzione non ha effetto.
+        var opzioni = host.Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
+        opzioni.DryRun = mode == PurgeExecutionMode.DryRun;
+
+        var gate = host.Services.GetRequiredService<PurgeApprovalGate>();
+        if (!await gate.IsAllowedAsync(mode, CancellationToken.None).ConfigureAwait(false))
+        {
+            // Codice diverso da zero, mai uno skip silenzioso: su UC4 un job
+            // che esce con zero senza aver fatto niente sembra riuscito.
+            Console.Error.WriteLine(
+                "Esecuzione in modalita' DELETE rifiutata: policy non approvata.");
+            return 3;
+        }
         if (!once)
         {
             await host.RunAsync().ConfigureAwait(false);
@@ -36,6 +108,89 @@ public static class Program
         }
 
         return await RunOnceAsync(host, args).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Approva la policy sotto cui e' girato un dry-run concluso.
+    ///
+    /// Cio' che si approva e' la policy, non il run: il dry-run e' la prova
+    /// che qualcuno ha esaminato un report prodotto con quella
+    /// configurazione. Se la policy cambia, l'impronta cambia e l'approvazione
+    /// non vale piu'.
+    ///
+    /// Comando separato dall'esecuzione di proposito: un'approvazione che
+    /// potesse essere data dallo stesso processo che poi cancella non sarebbe
+    /// un controllo.
+    /// </summary>
+    private static async Task<int> ApproveAsync(IHost host, string[] args)
+    {
+        var store = host.Services.GetRequiredService<PurgeRunStore>();
+        var options = host.Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
+
+        if (args.Length < 2 || !Guid.TryParse(args[1], out var runId))
+        {
+            Console.Error.WriteLine("Uso: purge approve <dry-run-id> --by <nome> [--note <testo>]");
+            return 2;
+        }
+
+        var by = ValoreOpzione(args, "--by");
+        if (string.IsNullOrWhiteSpace(by))
+        {
+            Console.Error.WriteLine(
+                "--by e' obbligatorio: un'approvazione senza un nome non e' un'approvazione.");
+            return 2;
+        }
+
+        var run = await store.ReadPolicyAsync(runId, CancellationToken.None).ConfigureAwait(false);
+
+        if (run is null)
+        {
+            Console.Error.WriteLine($"Run {runId} inesistente su questo database.");
+            return 2;
+        }
+
+        if (!run.Value.DryRun)
+        {
+            Console.Error.WriteLine(
+                $"Run {runId} non e' un dry-run: si approva un report esaminato, " +
+                "non una cancellazione gia' avvenuta.");
+            return 2;
+        }
+
+        if (run.Value.Phase != RunPhase.Completed)
+        {
+            Console.Error.WriteLine(
+                $"Run {runId} e' in stato {run.Value.Phase}: un dry-run non concluso " +
+                "non ha prodotto un report completo.");
+            return 2;
+        }
+
+        var hashCorrente = PurgePolicy.ComputeHash(options);
+
+        if (run.Value.PolicyHash != hashCorrente)
+        {
+            Console.Error.WriteLine(
+                $"Il dry-run {runId} e' girato con una policy diversa da quella configurata " +
+                "adesso. Approvarlo autorizzerebbe una cancellazione che nessuno ha esaminato.");
+            Console.Error.WriteLine($"  dry-run:  {run.Value.PolicyHash}");
+            Console.Error.WriteLine($"  corrente: {hashCorrente}");
+            return 2;
+        }
+
+        await store.ApproveAsync(hashCorrente, runId, by!, PurgePolicy.Describe(options),
+            ValoreOpzione(args, "--note"), CancellationToken.None).ConfigureAwait(false);
+
+        Console.WriteLine($"Policy approvata da {by}.");
+        Console.WriteLine($"  {PurgePolicy.Describe(options)}");
+        Console.WriteLine($"  impronta {hashCorrente}");
+        Console.WriteLine($"  dry-run di riferimento {runId}");
+        return 0;
+    }
+
+    private static string? ValoreOpzione(string[] args, string nome)
+    {
+        var i = Array.FindIndex(args, a => a.Equals(nome, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
     private static IHost BuildHost(string[] args, bool once)
@@ -104,6 +259,7 @@ public static class Program
         builder.Services.AddSingleton<PurgeHousekeeping>();
         builder.Services.AddSingleton<PurgeRunStore>();
         builder.Services.AddSingleton<BatchedStatementRunner>();
+        builder.Services.AddSingleton<PurgeApprovalGate>();
         builder.Services.AddSingleton<IPurgeStrategy, TerminatedStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, AbandonedStrategy>();
         builder.Services.AddSingleton<IPurgeStrategy, StandingOrdersStrategy>();
@@ -140,7 +296,8 @@ public static class Program
         // Lo scheduler esterno decide quando eseguire: la finestra non si applica.
         options.WindowEnabled = false;
 
-        var strategies = args.Length > 1 && Enum.TryParse<RetentionStrategy>(args[1], true, out var s)
+        var strategies = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)
+                         && Enum.TryParse<RetentionStrategy>(args[1], true, out var s)
             ? new List<RetentionStrategy> { s }
             : options.Strategies;
 

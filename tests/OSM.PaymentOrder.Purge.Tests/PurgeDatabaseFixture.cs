@@ -43,7 +43,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         foreach (var script in new[]
                  { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
                    "006_collective_atomicity.sql", "008_audit_trail.sql",
-                   "010_run_lifecycle.sql" })
+                   "010_run_lifecycle.sql", "011_policy_approval.sql" })
             await RunScriptAsync(script);
 
         Services = BuildServices();
@@ -116,6 +116,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         services.AddSingleton<PurgeHousekeeping>();
         services.AddSingleton<PurgeRunStore>();
         services.AddSingleton<BatchedStatementRunner>();
+        services.AddSingleton<PurgeApprovalGate>();
 
         services.AddSingleton<IPurgeStrategy, TerminatedStrategy>();
         services.AddSingleton<IPurgeStrategy, AbandonedStrategy>();
@@ -189,7 +190,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         string[] purgeTables =
         [
             "RunCandidateOrderHistory", "RunCandidateOrder", "RunCandidateCollective",
-            "RunBatchProgress", "ValidationFinding", "DryRunReport", "PurgeAudit",
+            "RunBatchProgress", "ValidationFinding", "DryRunReport", "PurgeAudit", "PolicyApproval",
             "PurgeRun"
         ];
 
