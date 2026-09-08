@@ -144,6 +144,48 @@ public sealed class SliceSplitTests(PurgeDatabaseFixture db) : IAsyncLifetime
     }
 
     /// <summary>
+    /// D-12: il cambio di stato in corsa segue la stessa strada della FK.
+    /// Sei ordini, uno torna in lavorazione dopo il planning: cinque
+    /// cancellati, quello cambiato isolato e abbandonato con il suo motivo,
+    /// senza consumare tentativi di retry su nessuna slice.
+    /// </summary>
+    [Fact]
+    public async Task Un_ordine_che_cambia_stato_viene_isolato_senza_retry()
+    {
+        var ordini = new List<Guid>();
+        for (var i = 0; i < 6; i++)
+            ordini.Add(await Seed.AddOrderAsync(revisions: 1));
+
+        var run = await PianificaAsync(RetentionStrategy.Terminated);
+        var cambiato = ordini[4];
+        await Seed.SetStatusAsync(cambiato, "Processing");
+
+        run = await RiprendiAsync(run.RunId);
+
+        Assert.Equal(RunPhase.CompletedWithErrors, run.Phase);
+        Assert.Equal(1, await Seed.CountAsync("[Order]"));
+        Assert.Equal(cambiato, await db.Sql.ScalarAsync<Guid>(
+            "SELECT Id FROM PaymentOrder.[Order];", default));
+        Assert.Equal(0, await Seed.CountOrphanRowsAsync());
+
+        var progress = await ProgressAsync(run.RunId);
+        var abbandonata = Assert.Single(progress, p => p.Status == "Abandoned");
+        Assert.Equal(1, abbandonata.OrderCount);
+
+        var motivo = await db.Sql.ScalarAsync<string>("""
+            SELECT LastError FROM Purge.RunBatchProgress
+            WHERE RunId = @RunId AND BatchNo = @BatchNo;
+            """, default, SqlParam.Of("@RunId", run.RunId), SqlParam.Of("@BatchNo", abbandonata.BatchNo));
+        Assert.Equal("StatusChangedDuringExecution", motivo);
+
+        // Nessuna slice ha consumato tentativi: la divisione sostituisce il retry.
+        var tentativi = await db.Sql.ScalarAsync<int>("""
+            SELECT ISNULL(SUM(AttemptCount), 0) FROM Purge.RunBatchProgress WHERE RunId = @RunId;
+            """, default, SqlParam.Of("@RunId", run.RunId));
+        Assert.Equal(0, tentativi);
+    }
+
+    /// <summary>
     /// L'unita' indivisibile e' l'aggregato. Due collettivi da tre in una
     /// slice, un componente sporco: la divisione separa i collettivi, quello
     /// pulito viene cancellato, quello sporco viene abbandonato intero — tre

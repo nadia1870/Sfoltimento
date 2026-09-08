@@ -420,3 +420,43 @@ singolo aggregato. Zero ripristina l'abbandono in blocco.
 - Gli storici orfani si dividono per singolo storico, con lo stesso
   statement: la scelta del ramo la fa `IF EXISTS` su `RunCandidateOrder`,
   così lo store non deve conoscere la strategia.
+
+---
+
+## D-12 — Il cambio di stato in corsa non si riprova: si divide
+
+**Contesto.** Quando la `DELETE` su `Order` cancellava meno righe di
+`slice.OrderCount`, `SliceExecutor` restituiva `Retryable`. Il coordinatore
+riprovava la stessa slice tre volte a distanza di `RetryDelay`, poi la
+abbandonava in blocco: fino a `MaxOrdersPerBatch` ordini lasciati a database
+perché uno solo era tornato in lavorazione.
+
+**Decisione.** L'esito diventa `Fatal` con `Splittable = true`, cioè la
+stessa strada della FK violata (D-11): la slice si divide finché l'ordine
+cambiato resta solo, e viene abbandonato lui.
+
+**Perché il retry era inutile.** Il conteggio della `DELETE` riflette lo stato
+committato. Sotto `READ COMMITTED` la `DELETE` attende i lock di una
+transazione concorrente e valuta il predicato dopo il commit; con RCSI attivo
+fa lo stesso, perché le DML rileggono la riga al momento della modifica. Se
+l'ordine non corrisponde più allo stato terminale, è perché qualcuno l'ha
+cambiato *e committato*. Un ordine che torna in lavorazione non torna
+`Executed` in cinque secondi; tre tentativi confermavano tre volte la stessa
+cosa, e poi si perdeva tutta la slice.
+
+**Cosa resta riprovabile.** Solo la contesa: deadlock, lock timeout, timeout di
+comando (`SqlErrors.IsConcurrency`) e `CollectiveAtomicityViolation`, che è
+un'incoerenza dello staging fra planning ed esecuzione, non dei dati. Sono i
+casi in cui la *stessa* slice, riprovata *uguale*, può passare.
+
+**Conseguenze.**
+
+- L'ordine abbandonato ha `LastError = StatusChangedDuringExecution` sulla
+  propria slice singleton, e nessuna slice del run consuma `AttemptCount` per
+  questo motivo. `SliceSplitTests` lo verifica sul database.
+- L'evento di log `PurgeSliceRetried` non copre più questo caso; il nuovo è
+  `PurgeSliceStatusChanged`. `PurgeSliceRetried` resta per deadlock e
+  collettivi non atomici.
+- Un ordine *già cancellato* da altri fra selezione ed esecuzione produce lo
+  stesso rowcount inferiore e segue la stessa strada. È corretto: il candidato
+  finisce `Failed`, e la traccia dice perché.

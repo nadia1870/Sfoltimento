@@ -93,14 +93,22 @@ public sealed class SliceExecutor(
             // esecuzione, la DELETE del gruppo 4 ne cancella meno del previsto.
             // Procedere lascerebbe a database un ordine privo di storico e
             // dettagli, che e' molto peggio del non fare nulla.
+            //
+            // Fatale e divisibile, non riprovabile (D-12). La DELETE ha
+            // atteso i lock delle transazioni concorrenti, quindi il conteggio
+            // riflette lo stato committato: l'ordine e' uscito dallo stato
+            // terminale davvero, e non ci tornera' fra cinque secondi.
+            // Riprovare la stessa slice costava tre tentativi per confermare
+            // una cosa gia' certa; dividerla isola l'ordine cambiato e lascia
+            // cancellare gli altri.
             if (strategy.PlanningMode != PurgePlanningMode.OrphanHistory && orderRows != slice.OrderCount)
             {
                 await session.RollbackAsync(ct).ConfigureAwait(false);
                 log.LogWarning(
-                    "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Atteso={Expected} " +
-                    "Cancellato={Actual} Motivo=StatoOrdineCambiato",
+                    "PurgeSliceStatusChanged RunId={RunId} BatchNo={BatchNo} Atteso={Expected} " +
+                    "Cancellato={Actual} — slice annullata, divisibile",
                     run.RunId, slice.BatchNo, slice.OrderCount, orderRows);
-                return SliceResult.Retryable("StatusChangedDuringExecution");
+                return SliceResult.Fatal("StatusChangedDuringExecution", splittable: true);
             }
 
             if (auditLines.Count > 0)

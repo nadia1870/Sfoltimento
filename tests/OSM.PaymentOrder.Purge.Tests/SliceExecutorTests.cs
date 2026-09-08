@@ -290,7 +290,10 @@ public sealed class SliceExecutorTests
 
         var result = await Sut(session).ExecuteAsync(Run(), Slice(orderCount: 3), CancellationToken.None);
 
-        Assert.Equal(SliceOutcome.Retryable, result.Outcome);
+        // D-12: fatale e divisibile, non riprovabile. Il conteggio riflette lo
+        // stato committato, quindi riprovare non cambierebbe l'esito.
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);
         Assert.Equal("StatusChangedDuringExecution", result.Reason);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
