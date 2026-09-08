@@ -16,6 +16,8 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
        002_indexes.sql         indici su PaymentOrder — valutare ONLINE = ON
        003_preflight.sql       verifiche sui dati, DA ESEGUIRE PRIMA
        004_verify_fk.sql       confronto FK reali vs topologia attesa
+       020_analisi_pre_dry_run.sql   baseline, sola lettura: volumi, pesi, anomalie, indici
+       021_analisi_post_dry_run.sql  lettura dell'ultimo run per strategia
        005 .. 012              migrazioni incrementali. 000 le contiene tutte
                                (InstallScriptContractTests lo verifica): servono
                                solo per aggiornare un database gia' installato
@@ -26,6 +28,9 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
 
 src/OSM.PaymentOrder.Purge/         motore
 src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
+
+docs/runbook-primo-dry-run.md       procedura per la prima simulazione in produzione
+docs/decisioni.md                   scelte non ovvie e perche'
 ```
 
 ## Avvio
