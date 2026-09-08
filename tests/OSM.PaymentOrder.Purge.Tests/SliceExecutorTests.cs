@@ -176,7 +176,7 @@ public sealed class SliceExecutorTests
         Assert.True(session.Disposed);
     }
 
-    /// <summary>Un errore non classificato abbandona la slice.</summary>
+    /// <summary>Un errore non classificato abbandona la slice, e non e' divisibile.</summary>
     [Fact]
     public async Task Un_errore_non_classificato_e_fatale()
     {
@@ -189,8 +189,58 @@ public sealed class SliceExecutorTests
         var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.False(result.Splittable);
+        Assert.Equal(nameof(InvalidOperationException), result.Reason);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
+    }
+
+    /// <summary>
+    /// D-11: una FK violata e' fatale per questa slice, ma e' un dato che
+    /// rifiuta la cancellazione e non un difetto. L'esito lo dichiara
+    /// divisibile, cosi' il coordinatore puo' isolare l'aggregato invece di
+    /// abbandonare tutti quelli che gli stanno accanto. Lo statement
+    /// successivo non parte e il commit non avviene.
+    /// </summary>
+    [Fact]
+    public async Task Una_fk_violata_e_fatale_ma_divisibile()
+    {
+        var session = new FakePurgeSession
+        {
+            FailAtStatement = 3,
+            Failure = SqlExceptionFactory.Create(547, "FK_OrderHistory_Order violata")
+        };
+
+        var result = await Sut(session).ExecuteAsync(Run(), Slice(orderCount: 5), CancellationToken.None);
+
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);
+        // Codice, non messaggio: e' un tag di metrica e una chiave di log.
+        Assert.Equal("Sql547", result.Reason);
+        Assert.Equal(1, session.Rollbacks);
+        Assert.Equal(0, session.Commits);
+        Assert.Equal(3, session.Executed.Count);
+        Assert.DoesNotContain(session.Executed, s => s.Contains("PurgeAudit"));
+    }
+
+    /// <summary>
+    /// Una SqlException con un numero che non e' ne' transitorio ne' di
+    /// integrita' — un difetto, tipo un oggetto inesistente — resta un
+    /// abbandono in blocco: dividerla fallirebbe ogni figlia allo stesso modo.
+    /// </summary>
+    [Fact]
+    public async Task Una_sqlexception_di_difetto_non_e_divisibile()
+    {
+        var session = new FakePurgeSession
+        {
+            FailAtStatement = 1,
+            Failure = SqlExceptionFactory.Create(208, "oggetto inesistente")
+        };
+
+        var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
+
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.False(result.Splittable);
     }
 
     /// <summary>La cancellazione propaga e non diventa un esito.</summary>
@@ -243,7 +293,10 @@ public sealed class SliceExecutorTests
 
         var result = await Sut(session).ExecuteAsync(Run(), Slice(orderCount: 3), CancellationToken.None);
 
-        Assert.Equal(SliceOutcome.Retryable, result.Outcome);
+        // D-12: fatale e divisibile, non riprovabile. Il conteggio riflette lo
+        // stato committato, quindi riprovare non cambierebbe l'esito.
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);
         Assert.Equal("StatusChangedDuringExecution", result.Reason);
         Assert.Equal(1, session.Rollbacks);
         Assert.Equal(0, session.Commits);
@@ -275,21 +328,27 @@ public sealed class SliceExecutorTests
     /// <summary>
     /// Un rollback fallito non deve coprire l'errore originale: e' quello che
     /// interessa a chi legge il log la mattina dopo.
+    ///
+    /// Il motivo e' un codice — numero SQL o nome del tipo — quindi le due
+    /// eccezioni devono essere di tipo diverso perche' l'assert distingua
+    /// davvero l'originale dal rollback. La prima e' una FK violata, come nel
+    /// caso reale; la seconda e' un tipo che il motore non tratta mai.
     /// </summary>
     [Fact]
     public async Task Un_rollback_fallito_non_copre_l_errore_originale()
     {
-        var originale = new InvalidOperationException("causa vera");
         var session = new FakePurgeSession
         {
             FailAtStatement = 1,
-            Failure = originale,
-            RollbackFailure = new InvalidOperationException("anche il rollback")
+            Failure = SqlExceptionFactory.Create(547, "causa vera"),
+            RollbackFailure = new NotSupportedException("anche il rollback")
         };
 
         var result = await Sut(session).ExecuteAsync(Run(), Slice(), CancellationToken.None);
 
         Assert.Equal(SliceOutcome.Fatal, result.Outcome);
-        Assert.Equal(originale.Message, result.Reason);
+        Assert.Equal("Sql547", result.Reason);
+        Assert.True(result.Splittable);   // classificata sull'originale, non sul rollback
+        Assert.NotEqual(nameof(NotSupportedException), result.Reason);
     }
 }

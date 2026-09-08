@@ -16,20 +16,27 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
        002_indexes.sql         indici su PaymentOrder — valutare ONLINE = ON
        003_preflight.sql       verifiche sui dati, DA ESEGUIRE PRIMA
        004_verify_fk.sql       confronto FK reali vs topologia attesa
+       020_analisi_pre_dry_run.sql   baseline, sola lettura: volumi, pesi, anomalie, indici
+       021_analisi_post_dry_run.sql  lettura dell'ultimo run per strategia
+       005 .. 012              migrazioni incrementali. 000 le contiene tutte
+                               (InstallScriptContractTests lo verifica): servono
+                               solo per aggiornare un database gia' installato
+                               un passo alla volta.
        008_audit_trail.sql     traccia di audit per slice, RICHIESTO
        009_verify_audit.sql    riscontro previsto/effettivo dopo un run
        010_run_lifecycle.sql   fasi del run e contatore interruzioni, RICHIESTO
 
 src/OSM.PaymentOrder.Purge/         motore
 src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
+
+docs/runbook-primo-dry-run.md       procedura per la prima simulazione in produzione
+docs/decisioni.md                   scelte non ovvie e perche'
 ```
 
 ## Avvio
 
 ```bash
 sqlcmd -S <host>,<porta> -d <database> -i db/000_install_purge.sql
-sqlcmd -S <host>,<porta> -d <database> -i db/008_audit_trail.sql
-sqlcmd -S <host>,<porta> -d <database> -i db/010_run_lifecycle.sql
 sqlcmd -S <host>,<porta> -d <database> -i db/003_preflight.sql
 
 dotnet run --project src/OSM.PaymentOrder.Purge.Host              # servizio con cron
@@ -66,6 +73,12 @@ Il `GRANT DELETE` va concesso solo dopo l'approvazione del report.
 - Le foreign key `Restrict` non vanno mai disabilitate: sono la rete di
   sicurezza finale.
 - `MaxRowsPerBatch` va tarato sui dati reali (verifica 3 di `003_preflight.sql`).
+- Un collettivo che non si puo' cancellare viene censito in
+  `Purge.RunCandidateCollective` con `State = 'Excluded'` e un motivo, e il
+  run prosegue (D-10). Resta a database finche' qualcuno lo guarda.
+- Una slice che fallisce per un errore di dati viene divisa in due (D-11)
+  finche' l'abbandono riguarda un aggregato solo. La genealogia e' in
+  `Purge.RunBatchProgress.ParentBatchNo`.
 - La paginazione della selezione dipende dagli indici di `002_indexes.sql`:
   senza, il ciclo diventa piu' lento dello statement unico che sostituisce.
   Vedere `docs/decisioni.md`, D-1, prima di modificarla.
@@ -81,6 +94,10 @@ Il `GRANT DELETE` va concesso solo dopo l'approvazione del report.
 `db/009_verify_audit.sql` confronta la traccia di audit con i checkpoint e con
 il previsionale. Il primo dei suoi controlli e' quello che conta: se l'audit e
 il checkpoint divergono, uno dei due mente e nessuno dei due e' utilizzabile.
+
+## Storia delle versioni
+
+`docs/changelog/`. Le scelte non ovvie sono in `docs/decisioni.md`.
 
 ## Punti aperti
 

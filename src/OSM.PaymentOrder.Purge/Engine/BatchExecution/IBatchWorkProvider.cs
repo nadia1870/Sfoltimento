@@ -19,6 +19,20 @@ public interface IBatchWorkProvider
         CancellationToken ct);
 
     /// <summary>
+    /// Divide la slice in due figlie per aggregato e le mette in coda (D-11).
+    /// Restituisce quante figlie ha creato. Zero significa che la slice
+    /// conteneva un aggregato solo e non e' stata toccata: e' il segnale per
+    /// abbandonare, perche' a quel punto l'abbandono e' circoscritto al
+    /// colpevole. Il coordinatore decide *se* dividere; come si divide e'
+    /// affare della persistenza.
+    /// </summary>
+    Task<int> SplitAsync(
+        Guid runId,
+        int batchNo,
+        string? reason,
+        CancellationToken ct);
+
+    /// <summary>
     /// Slice abbandonate del run, tutte, non solo quelle di questa sessione.
     ///
     /// Sta qui e non su PurgeRunStore perche' il coordinatore deve poter

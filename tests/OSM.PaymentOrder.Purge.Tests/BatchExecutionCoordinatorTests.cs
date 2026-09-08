@@ -110,6 +110,140 @@ public sealed class BatchExecutionCoordinatorTests
         Assert.Equal(1, result.AbandonedSlices);
         Assert.Equal(5, result.RowsDeleted);
         Assert.Equal((3, "invalid state"), Assert.Single(provider.Abandoned));
+        Assert.Empty(provider.Splits);
+    }
+
+    // ------------------------------------------------------ bisezione D-11
+
+    /// <summary>
+    /// Quattro aggregati, il terzo rifiuta la cancellazione. Senza bisezione
+    /// se ne perderebbero quattro; con la bisezione se ne perde uno, e
+    /// l'abbandono finale riguarda una slice da un aggregato solo. Il
+    /// lavoro extra e' due split, non quattro transazioni singole.
+    /// </summary>
+    [Fact]
+    public async Task Un_errore_di_dati_divide_la_slice_e_abbandona_solo_il_colpevole()
+    {
+        const int colpevole = 3;
+        var provider = new FakeWorkProvider(SliceWith(orders: 4, batchNo: 1));
+        var executor = new FakeExecutor((_, slice) =>
+            provider.AggregatesOf(slice.BatchNo).Contains(colpevole)
+                ? SliceResult.Fatal("FK", splittable: true)
+                : SliceResult.Ok(slice.OrderCount));
+        var sut = CreateSut(provider, executor);
+
+        var result = await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal(2, result.CompletedSlices);     // {1,2} e {4}
+        Assert.Equal(3, result.RowsDeleted);
+        Assert.Equal(1, result.AbandonedSlices);
+        Assert.Equal(1, result.AbandonedTotal);
+
+        var abbandonata = Assert.Single(provider.Abandoned);
+        Assert.Equal(1, provider.OrderCountOf(abbandonata.BatchNo));
+        Assert.Equal(new[] { colpevole }, provider.AggregatesOf(abbandonata.BatchNo));
+
+        // Due divisioni con figlie: {1,2,3,4} e {3,4}. La terza richiesta,
+        // sulla slice {3}, torna a vuoto ed e' quella che porta all'abbandono:
+        // il coordinatore non sa quanti aggregati contiene una slice — un
+        // collettivo da tre ordini e' un aggregato solo — e lo chiede allo store.
+        Assert.Equal(2, provider.Splits.Count(s => s.Children > 0));
+        Assert.Equal((abbandonata.BatchNo, 0), provider.Splits.Last());
+    }
+
+    /// <summary>
+    /// La bisezione non si applica a un esito che non la dichiara: un
+    /// difetto del programma fallirebbe ogni figlia, e dividerlo
+    /// moltiplicherebbe soltanto le transazioni fallite.
+    /// </summary>
+    [Fact]
+    public async Task Un_esito_non_divisibile_viene_abbandonato_in_blocco()
+    {
+        var provider = new FakeWorkProvider(SliceWith(orders: 4, batchNo: 1));
+        var executor = new FakeExecutor((_, _) => SliceResult.Fatal("difetto", splittable: false));
+        var sut = CreateSut(provider, executor);
+
+        var result = await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(1, result.AbandonedSlices);
+        Assert.Empty(provider.Splits);
+        Assert.Equal(4, provider.OrderCountOf(Assert.Single(provider.Abandoned).BatchNo));
+    }
+
+    /// <summary>MaxSplitDepth a zero disattiva la bisezione e ripristina l'abbandono in blocco.</summary>
+    [Fact]
+    public async Task Con_profondita_zero_non_si_divide_mai()
+    {
+        var provider = new FakeWorkProvider(SliceWith(orders: 4, batchNo: 1));
+        var executor = new FakeExecutor((_, _) => SliceResult.Fatal("FK", splittable: true));
+        var sut = CreateSut(provider, executor, configure: o => o.MaxSplitDepth = 0);
+
+        var result = await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(1, result.AbandonedSlices);
+        Assert.Empty(provider.Splits);
+    }
+
+    /// <summary>
+    /// Il freno in profondita': con un difetto che si spaccia per errore di
+    /// dati, ogni figlia fallisce. Oltre MaxSplitDepth si smette di dividere
+    /// e si abbandona cio' che resta, anche se contiene piu' di un aggregato.
+    /// </summary>
+    [Fact]
+    public async Task Oltre_la_profondita_massima_si_abbandona_anche_se_divisibile()
+    {
+        var provider = new FakeWorkProvider(SliceWith(orders: 8, batchNo: 1));
+        var executor = new FakeExecutor((_, _) => SliceResult.Fatal("FK", splittable: true));
+        var sut = CreateSut(provider, executor, configure: o => o.MaxSplitDepth = 1);
+
+        var result = await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        // Una sola divisione (8 -> 4+4), poi le due figlie a profondita' 1
+        // vengono abbandonate senza dividerle ancora.
+        Assert.Single(provider.Splits);
+        Assert.Equal(2, result.AbandonedSlices);
+        Assert.All(provider.Abandoned, a => Assert.Equal(4, provider.OrderCountOf(a.BatchNo)));
+    }
+
+    /// <summary>
+    /// Una slice da un aggregato solo e' gia' il caso circoscritto: lo store
+    /// restituisce zero figlie e il coordinatore abbandona senza contare una
+    /// divisione avvenuta.
+    /// </summary>
+    [Fact]
+    public async Task Una_slice_da_un_aggregato_solo_viene_abbandonata_direttamente()
+    {
+        var provider = new FakeWorkProvider(SliceWith(orders: 1, batchNo: 1));
+        var executor = new FakeExecutor((_, _) => SliceResult.Fatal("FK", splittable: true));
+        var sut = CreateSut(provider, executor);
+
+        var result = await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(1, result.AbandonedSlices);
+        Assert.Equal((1, 0), Assert.Single(provider.Splits));
+        Assert.Equal(1, Assert.Single(provider.Abandoned).BatchNo);
+    }
+
+    /// <summary>
+    /// Le figlie vanno in coda, non davanti: la slice pendente successiva
+    /// viene eseguita prima di tornare sul dubbio.
+    /// </summary>
+    [Fact]
+    public async Task Le_figlie_della_divisione_vanno_dopo_le_slice_pendenti()
+    {
+        var provider = new FakeWorkProvider(
+            SliceWith(orders: 2, batchNo: 1),
+            SliceWith(orders: 1, batchNo: 2));
+        var executor = new FakeExecutor((_, slice) =>
+            slice.BatchNo == 1
+                ? SliceResult.Fatal("FK", splittable: true)
+                : SliceResult.Ok(slice.OrderCount));
+        var sut = CreateSut(provider, executor);
+
+        await sut.ExecuteAsync(CreateRun(), CancellationToken.None);
+
+        Assert.Equal(new[] { 1, 2, 3, 4 }, executor.ExecutedBatches);
     }
 
     [Fact]
@@ -227,6 +361,15 @@ public sealed class BatchExecutionCoordinatorTests
         IsOversized = false
     };
 
+    private static SliceInfo SliceWith(int orders, int batchNo) => new()
+    {
+        BatchNo = batchNo,
+        OrderCount = orders,
+        EstimatedRowCount = orders,
+        AttemptCount = 0,
+        IsOversized = false
+    };
+
     /// <summary>
     /// Un'eccezione dell'esecutore deve attraversare il coordinatore senza
     /// essere tradotta in un abbandono.
@@ -294,9 +437,28 @@ public sealed class BatchExecutionCoordinatorTests
     {
         private readonly Queue<SliceInfo> _slices = new(slices);
 
+        /// <summary>
+        /// Aggregati per slice. Il fake modella lo store: per dividere una
+        /// slice deve sapere cosa contiene, e SliceInfo non lo dice. Le
+        /// slice date al costruttore ricevono aggregati numerati da 1 in
+        /// base a OrderCount.
+        /// </summary>
+        private readonly Dictionary<int, List<int>> _aggregates =
+            slices.ToDictionary(
+                s => s.BatchNo,
+                s => Enumerable.Range(1, s.OrderCount).ToList());
+
+        private int _nextBatchNo = slices.Length == 0 ? 0 : slices.Max(s => s.BatchNo) + 1;
+
         public int GetNextCalls { get; private set; }
         public List<(int BatchNo, string Reason)> RecordedAttempts { get; } = [];
         public List<(int BatchNo, string Reason)> Abandoned { get; } = [];
+        public List<(int BatchNo, int Children)> Splits { get; } = [];
+
+        public IReadOnlyList<int> AggregatesOf(int batchNo) => _aggregates[batchNo];
+
+        /// <summary>OrderCount della slice abbandonata: deve essere 1 se la bisezione ha isolato il colpevole.</summary>
+        public int OrderCountOf(int batchNo) => _aggregates[batchNo].Count;
 
         public Task<SliceInfo?> GetNextAsync(Guid runId, CancellationToken ct)
         {
@@ -304,6 +466,47 @@ public sealed class BatchExecutionCoordinatorTests
             GetNextCalls++;
             return Task.FromResult(_slices.Count == 0 ? null : _slices.Dequeue());
         }
+
+        /// <summary>
+        /// Stesso contratto dello statement SplitSlice: due figlie per
+        /// aggregato, in coda, con profondita' + 1; zero se l'aggregato e'
+        /// uno solo, e in quel caso non tocca niente.
+        /// </summary>
+        public Task<int> SplitAsync(Guid runId, int batchNo, string? reason, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var aggregates = _aggregates[batchNo];
+            if (aggregates.Count < 2)
+            {
+                Splits.Add((batchNo, 0));
+                return Task.FromResult(0);
+            }
+
+            var depth = _depths.GetValueOrDefault(batchNo);
+            var half = aggregates.Count / 2;
+
+            foreach (var part in new[] { aggregates.Take(half).ToList(), aggregates.Skip(half).ToList() })
+            {
+                var child = _nextBatchNo++;
+                _aggregates[child] = part;
+                _depths[child] = depth + 1;
+                _slices.Enqueue(new SliceInfo
+                {
+                    BatchNo = child,
+                    OrderCount = part.Count,
+                    EstimatedRowCount = part.Count,
+                    AttemptCount = 0,
+                    IsOversized = false,
+                    SplitDepth = depth + 1
+                });
+            }
+
+            Splits.Add((batchNo, 2));
+            return Task.FromResult(2);
+        }
+
+        private readonly Dictionary<int, int> _depths = [];
 
         public Task RecordAttemptAsync(Guid runId, int batchNo, string? reason, CancellationToken ct)
         {

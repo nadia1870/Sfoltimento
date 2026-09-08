@@ -226,7 +226,112 @@ public static class RetentionSql
                           WHERE x.RunId = @RunId AND x.CollectiveOrderId = co.Id);
         """;
 
-    /// <summary>Un Order deve appartenere a un solo Collective per il run atomico.</summary>
+    // -----------------------------------------------------------------
+    // Esclusioni dei collettivi (D-10).
+    //
+    // Un collettivo eleggibile puo' contenere un componente che non si puo'
+    // cancellare: referenziato da un modello, condiviso con un altro
+    // collettivo, o con uno storico di dettaglio che punta fuori
+    // dall'aggregato. Prima queste anomalie arrivavano in Validating, che
+    // fallisce l'intero run: un collettivo anomalo bloccava stabilmente tutta
+    // la strategia, notte dopo notte.
+    //
+    // Ora il collettivo viene censito con State = 'Excluded' e un motivo,
+    // esattamente come quelli senza ExecutionDate, e non entra nei componenti.
+    // Le validazioni V1/V2 restano fail-hard: dopo queste UPDATE un finding
+    // li' e' un difetto della selezione, non un dato strano.
+    //
+    // Tutte le UPDATE sono idempotenti: la fase di selezione riparte da capo
+    // dopo un'interruzione, e riescluderebbero cio' che e' gia' escluso.
+    // -----------------------------------------------------------------
+
+    /// <summary>Componente referenziato da un modello (C5): la cascata lo distruggerebbe.</summary>
+    public const string ExcludeCollectivesWithModel = $"""
+        UPDATE rc
+           SET State = 'Excluded', ExcludedReason = 'ComponentHasModel'
+        FROM Purge.RunCandidateCollective AS rc
+        WHERE rc.RunId = @RunId AND rc.State = 'Selected'
+          AND EXISTS (
+                SELECT 1
+                FROM {S}.CollectiveOrderGroup AS g
+                INNER JOIN {S}.CollectiveOrderGroupOrder AS cgo ON cgo.CollectiveOrderGroupId = g.Id
+                INNER JOIN {S}.Model AS m ON m.OrderId = cgo.OrderId
+                WHERE g.CollectiveOrderId = rc.CollectiveOrderId);
+        """;
+
+    /// <summary>
+    /// Componente condiviso con un altro collettivo eleggibile.
+    ///
+    /// Vengono esclusi entrambi: non c'e' modo di decidere quale dei due
+    /// "possieda" l'ordine, e cancellarne uno lascerebbe l'altro con un
+    /// componente sparito. Una singola UPDATE legge lo snapshot precedente
+    /// allo statement, quindi la lettura di orc.State = 'Selected' vede
+    /// entrambi i membri della coppia ancora selezionati e li esclude nello
+    /// stesso giro. Non e' ovvio, per questo e' scritto qui.
+    /// </summary>
+    public const string ExcludeAmbiguousCollectives = $"""
+        UPDATE rc
+           SET State = 'Excluded', ExcludedReason = 'AmbiguousMembership'
+        FROM Purge.RunCandidateCollective AS rc
+        WHERE rc.RunId = @RunId AND rc.State = 'Selected'
+          AND EXISTS (
+                SELECT 1
+                FROM {S}.CollectiveOrderGroup AS g
+                INNER JOIN {S}.CollectiveOrderGroupOrder AS cgo ON cgo.CollectiveOrderGroupId = g.Id
+                INNER JOIN {S}.CollectiveOrderGroupOrder AS other ON other.OrderId = cgo.OrderId
+                INNER JOIN {S}.CollectiveOrderGroup AS og ON og.Id = other.CollectiveOrderGroupId
+                INNER JOIN Purge.RunCandidateCollective AS orc
+                        ON orc.RunId = rc.RunId AND orc.CollectiveOrderId = og.CollectiveOrderId
+                WHERE g.CollectiveOrderId = rc.CollectiveOrderId
+                  AND cgo.OrderId IS NOT NULL
+                  AND og.CollectiveOrderId <> rc.CollectiveOrderId
+                  AND orc.State = 'Selected');
+        """;
+
+    /// <summary>Prefisso del motivo per il caso C7, seguito dal nome della tabella di storico.</summary>
+    public const string CrossReferenceReasonPrefix = "CrossRef:";
+
+    /// <summary>
+    /// Storico di dettaglio di un componente che punta a un dettaglio di un
+    /// ordine fuori dal collettivo (C7). La slice cancellerebbe lo storico ma
+    /// non il dettaglio referenziato, e V1 lo intercetterebbe fallendo il run.
+    /// </summary>
+    public static string ExcludeCollectivesWithCrossReference(DetailHistoryTable t) => $"""
+        UPDATE rc
+           SET State = 'Excluded', ExcludedReason = '{CrossReferenceReasonPrefix}{t.Name}'
+        FROM Purge.RunCandidateCollective AS rc
+        WHERE rc.RunId = @RunId AND rc.State = 'Selected'
+          AND EXISTS (
+                SELECT 1
+                FROM {S}.CollectiveOrderGroup AS g
+                INNER JOIN {S}.CollectiveOrderGroupOrder AS cgo ON cgo.CollectiveOrderGroupId = g.Id
+                INNER JOIN {S}.OrderHistory AS oh ON oh.OrderRefId = cgo.OrderId
+                INNER JOIN {S}.{t.Name} AS h ON h.OrderHistoryId = oh.Id
+                INNER JOIN {S}.{t.CurrentTable} AS d ON d.Id = h.{t.RefColumn}
+                WHERE g.CollectiveOrderId = rc.CollectiveOrderId
+                  AND h.{t.RefColumn} IS NOT NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM {S}.CollectiveOrderGroupOrder AS x
+                        INNER JOIN {S}.CollectiveOrderGroup AS xg ON xg.Id = x.CollectiveOrderGroupId
+                        WHERE xg.CollectiveOrderId = rc.CollectiveOrderId
+                          AND x.OrderId = d.OrderId));
+        """;
+
+    /// <summary>Collettivi esclusi per motivo, per il report del dry-run.</summary>
+    public const string CountExcludedCollectivesByReason = """
+        SELECT ExcludedReason, COUNT_BIG(*)
+        FROM Purge.RunCandidateCollective
+        WHERE RunId = @RunId AND State = 'Excluded'
+        GROUP BY ExcludedReason
+        ORDER BY ExcludedReason;
+        """;
+
+    /// <summary>
+    /// Un Order deve appartenere a un solo Collective per il run atomico.
+    /// Dopo ExcludeAmbiguousCollectives deve restituire zero: un valore
+    /// diverso e' un difetto dell'esclusione, non un dato da gestire.
+    /// </summary>
     public const string ValidateOrderBelongsToSingleCollective = $"""
         SELECT COUNT(*)
         FROM (
@@ -828,6 +933,12 @@ public static class RetentionSql
         WHERE c.RunId = @RunId;
         """;
 
+    /// <summary>
+    /// Il filtro su State = 'Selected' non e' ridondante: i collettivi
+    /// censiti come 'Excluded' hanno BatchNo NULL e nessuna DELETE li tocca,
+    /// ma senza il filtro il conteggio previsionale li includeva, e
+    /// vDryRunVsActual riportava uno scostamento inventato.
+    /// </summary>
     public static string CountCollectiveAggregate(string table) => table switch
     {
         "CollectiveOrderGroupOrderHistoryResidue" => $"""
@@ -837,45 +948,45 @@ public static class RetentionSql
                     ON cgo.Id = gh.CollectiveOrderGroupOrderRefId
             INNER JOIN {S}.CollectiveOrderGroup AS g ON g.Id = cgo.CollectiveOrderGroupId
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = g.CollectiveOrderId
-            WHERE rc.RunId = @RunId AND cgo.OrderId IS NULL;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected' AND cgo.OrderId IS NULL;
             """,
         "CollectiveOrderGroupOrderResidue" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrderGroupOrder AS cgo
             INNER JOIN {S}.CollectiveOrderGroup AS g ON g.Id = cgo.CollectiveOrderGroupId
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = g.CollectiveOrderId
-            WHERE rc.RunId = @RunId AND cgo.OrderId IS NULL;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected' AND cgo.OrderId IS NULL;
             """,
         "CollectiveOrderGroupHistory" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrderGroupHistory AS gh
             INNER JOIN {S}.CollectiveOrderGroup AS g ON g.Id = gh.CollectiveOrderGroupRefId
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = g.CollectiveOrderId
-            WHERE rc.RunId = @RunId;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected';
             """,
         "CollectiveOrderGroup" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrderGroup AS g
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = g.CollectiveOrderId
-            WHERE rc.RunId = @RunId;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected';
             """,
         "CollectiveOrderContent" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrderContent AS c
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = c.CollectiveOrderId
-            WHERE rc.RunId = @RunId;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected';
             """,
         "CollectiveOrderHistory" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrderHistory AS h
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = h.CollectiveOrderRefId
-            WHERE rc.RunId = @RunId;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected';
             """,
         "CollectiveOrder" => $"""
             SELECT COUNT_BIG(*)
             FROM {S}.CollectiveOrder AS co
             INNER JOIN Purge.RunCandidateCollective AS rc ON rc.CollectiveOrderId = co.Id
-            WHERE rc.RunId = @RunId;
+            WHERE rc.RunId = @RunId AND rc.State = 'Selected';
             """,
         _ => throw new ArgumentOutOfRangeException(nameof(table), table, "Tabella collettiva sconosciuta.")
     };
@@ -1018,10 +1129,136 @@ public static class RetentionSql
         """;
 
     public const string NextPendingSlice = """
-        SELECT TOP (1) BatchNo, OrderCount, EstimatedRowCount, AttemptCount, IsOversized
+        SELECT TOP (1) BatchNo, OrderCount, EstimatedRowCount, AttemptCount, IsOversized, SplitDepth
         FROM Purge.RunBatchProgress
         WHERE RunId = @RunId AND Status IN ('Pending','Running')
         ORDER BY BatchNo;
+        """;
+
+    // -----------------------------------------------------------------
+    // Bisezione di una slice (D-11).
+    //
+    // La slice che fallisce per un errore di dati viene divisa in due figlie,
+    // per aggregato: un collettivo resta intero, perche' e' l'unita' atomica
+    // su cui si regge ValidateCollectiveBatchIntegrity. Le figlie prendono
+    // BatchNo nuovi in coda — MAX + 1 e MAX + 2 — cosi' NextPendingSlice le
+    // serve dopo le slice ancora pendenti: si finisce il lavoro certo prima
+    // di tornare sul dubbio. La madre resta come traccia con Status = 'Split'.
+    //
+    // Con un aggregato solo non c'e' niente da dividere: si esce senza
+    // toccare nulla e si restituisce zero, e il chiamante abbandona. E' il
+    // caso in cui l'abbandono e' davvero circoscritto al colpevole.
+    //
+    // ORDER BY AggKey rende la divisione deterministica: la stessa madre
+    // produce sempre le stesse figlie. Per gli storici orfani, che non hanno
+    // OrderId, la chiave e' OrderHistoryId e la tabella e' un'altra: la
+    // scelta la fa il ramo IF, cosi' lo store non deve conoscere la
+    // strategia.
+    //
+    // Una sola transazione con XACT_ABORT: o la split e' avvenuta, o no. Se
+    // la finestra chiude subito dopo, la notte successiva trova le figlie.
+    // -----------------------------------------------------------------
+    public const string SplitSlice = """
+        SET NOCOUNT ON;
+        SET XACT_ABORT ON;
+
+        DECLARE @Next  INT = (SELECT MAX(BatchNo) + 1 FROM Purge.RunBatchProgress WHERE RunId = @RunId);
+        DECLARE @Depth INT = (SELECT SplitDepth FROM Purge.RunBatchProgress
+                              WHERE RunId = @RunId AND BatchNo = @BatchNo);
+        DECLARE @Children INT = 0;
+
+        IF @Depth IS NULL
+        BEGIN
+            SELECT Children = 0;
+            RETURN;
+        END
+
+        BEGIN TRAN;
+
+        IF EXISTS (SELECT 1 FROM Purge.RunCandidateOrder
+                   WHERE RunId = @RunId AND BatchNo = @BatchNo AND State = 'Selected')
+        BEGIN
+            -- Slice di ordini: l'aggregato e' il collettivo, oppure l'ordine.
+            DECLARE @agg TABLE (AggKey UNIQUEIDENTIFIER PRIMARY KEY, NewBatchNo INT NOT NULL);
+
+            INSERT INTO @agg (AggKey, NewBatchNo)
+            SELECT AggKey,
+                   @Next + CASE WHEN ROW_NUMBER() OVER (ORDER BY AggKey) * 2 <= COUNT(*) OVER ()
+                                THEN 0 ELSE 1 END
+            FROM (SELECT DISTINCT AggKey = COALESCE(CollectiveOrderId, OrderId)
+                  FROM Purge.RunCandidateOrder
+                  WHERE RunId = @RunId AND BatchNo = @BatchNo AND State = 'Selected') AS s;
+
+            IF (SELECT COUNT(*) FROM @agg) >= 2
+            BEGIN
+                UPDATE c SET c.BatchNo = a.NewBatchNo
+                FROM Purge.RunCandidateOrder AS c
+                INNER JOIN @agg AS a ON a.AggKey = COALESCE(c.CollectiveOrderId, c.OrderId)
+                WHERE c.RunId = @RunId AND c.BatchNo = @BatchNo;
+
+                UPDATE h SET h.BatchNo = c.BatchNo
+                FROM Purge.RunCandidateOrderHistory AS h
+                INNER JOIN Purge.RunCandidateOrder AS c ON c.RunId = h.RunId AND c.OrderId = h.OrderId
+                WHERE h.RunId = @RunId AND h.BatchNo = @BatchNo;
+
+                UPDATE rc SET rc.BatchNo = a.NewBatchNo
+                FROM Purge.RunCandidateCollective AS rc
+                INNER JOIN @agg AS a ON a.AggKey = rc.CollectiveOrderId
+                WHERE rc.RunId = @RunId AND rc.BatchNo = @BatchNo;
+
+                INSERT INTO Purge.RunBatchProgress
+                    (RunId, BatchNo, Status, IsOversized, OrderCount, EstimatedRowCount,
+                     ParentBatchNo, SplitDepth)
+                SELECT @RunId, c.BatchNo, 'Pending', MAX(CAST(c.IsOversized AS INT)), COUNT(*),
+                       SUM(ISNULL(c.RowWeight, 1)), @BatchNo, @Depth + 1
+                FROM Purge.RunCandidateOrder AS c
+                WHERE c.RunId = @RunId AND c.BatchNo IN (@Next, @Next + 1)
+                GROUP BY c.BatchNo;
+
+                SET @Children = @@ROWCOUNT;
+            END
+        END
+        ELSE
+        BEGIN
+            -- Slice di storici orfani: l'aggregato e' il singolo storico.
+            DECLARE @orphans TABLE (OrderHistoryId UNIQUEIDENTIFIER PRIMARY KEY, NewBatchNo INT NOT NULL);
+
+            INSERT INTO @orphans (OrderHistoryId, NewBatchNo)
+            SELECT OrderHistoryId,
+                   @Next + CASE WHEN ROW_NUMBER() OVER (ORDER BY OrderHistoryId) * 2 <= COUNT(*) OVER ()
+                                THEN 0 ELSE 1 END
+            FROM Purge.RunCandidateOrderHistory
+            WHERE RunId = @RunId AND BatchNo = @BatchNo AND OrderId IS NULL;
+
+            IF (SELECT COUNT(*) FROM @orphans) >= 2
+            BEGIN
+                UPDATE h SET h.BatchNo = o.NewBatchNo
+                FROM Purge.RunCandidateOrderHistory AS h
+                INNER JOIN @orphans AS o ON o.OrderHistoryId = h.OrderHistoryId
+                WHERE h.RunId = @RunId;
+
+                INSERT INTO Purge.RunBatchProgress
+                    (RunId, BatchNo, Status, IsOversized, OrderCount, EstimatedRowCount,
+                     ParentBatchNo, SplitDepth)
+                SELECT @RunId, h.BatchNo, 'Pending', 0, COUNT(*), COUNT(*), @BatchNo, @Depth + 1
+                FROM Purge.RunCandidateOrderHistory AS h
+                WHERE h.RunId = @RunId AND h.BatchNo IN (@Next, @Next + 1) AND h.OrderId IS NULL
+                GROUP BY h.BatchNo;
+
+                SET @Children = @@ROWCOUNT;
+            END
+        END
+
+        IF @Children > 0
+        BEGIN
+            UPDATE Purge.RunBatchProgress
+               SET Status = 'Split', LastError = @Reason, CompletedOn = SYSDATETIMEOFFSET()
+             WHERE RunId = @RunId AND BatchNo = @BatchNo;
+        END
+
+        COMMIT;
+
+        SELECT Children = @Children;
         """;
 
     public static IEnumerable<(string Table, string Sql)> OrphanSliceStatements()

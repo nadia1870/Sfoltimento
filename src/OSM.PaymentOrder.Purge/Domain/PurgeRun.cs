@@ -119,6 +119,13 @@ public sealed class SliceInfo
     /// dedicata, con un picco di lock accettato consapevolmente (§6.3).
     /// </summary>
     public required bool IsOversized { get; init; }
+
+    /// <summary>
+    /// Quante bisezioni separano questa slice da quella pianificata in
+    /// origine (D-11). Zero per le slice del planner. Oltre MaxSplitDepth
+    /// il coordinatore smette di dividere e abbandona.
+    /// </summary>
+    public int SplitDepth { get; init; }
 }
 
 public enum SliceOutcome { Completed, Retryable, Fatal }
@@ -129,14 +136,23 @@ public sealed class SliceResult
     public int RowsDeleted { get; init; }
     public string? Reason { get; init; }
 
+    /// <summary>
+    /// Vero se il guasto e' un errore di dati circoscritto a un aggregato —
+    /// una FK violata, una chiave duplicata — e quindi dividere la slice in
+    /// due puo' isolarlo (D-11). Falso per tutto il resto: un difetto del
+    /// programma fallirebbe ogni figlia allo stesso modo, e dividere
+    /// moltiplicherebbe le transazioni fallite senza scoprire niente.
+    /// </summary>
+    public bool Splittable { get; init; }
+
     public static SliceResult Ok(int rows) =>
         new() { Outcome = SliceOutcome.Completed, RowsDeleted = rows };
 
     public static SliceResult Retryable(string reason) =>
         new() { Outcome = SliceOutcome.Retryable, Reason = reason };
 
-    public static SliceResult Fatal(string reason) =>
-        new() { Outcome = SliceOutcome.Fatal, Reason = reason };
+    public static SliceResult Fatal(string reason, bool splittable = false) =>
+        new() { Outcome = SliceOutcome.Fatal, Reason = reason, Splittable = splittable };
 }
 
 public sealed record ValidationFinding(string RuleId, string Table, long AffectedCount);
@@ -169,6 +185,7 @@ public sealed class ValidationReport
 public sealed class DryRunReport
 {
     private readonly Dictionary<string, long> _lines = [];
+    private readonly Dictionary<string, long> _excludedCollectives = [];
 
     public required Guid RunId { get; init; }
     public DateTimeOffset ProducedOn { get; init; } = DateTimeOffset.UtcNow;
@@ -183,6 +200,17 @@ public sealed class DryRunReport
     public long UnassignedOrders { get; set; }
 
     public void Add(string table, long count) => _lines[table] = count;
+
+    /// <summary>
+    /// Collettivi censiti e non cancellati, per motivo (D-10). Non entrano in
+    /// Lines: quelle righe vengono persistite in Purge.DryRunReport e
+    /// confrontate con l'audit per nome di tabella, e un motivo di esclusione
+    /// non e' una tabella. Comparirebbero in vDryRunVsActual come scostamento.
+    /// </summary>
+    public IReadOnlyDictionary<string, long> ExcludedCollectives => _excludedCollectives;
+
+    public void AddExcludedCollectives(string reason, long count) =>
+        _excludedCollectives[reason] = count;
 
     public long OrderCount => _lines.GetValueOrDefault("Order");
     public long TotalRows => _lines.Values.Sum();
@@ -204,6 +232,12 @@ public sealed class DryRunReport
         sb.AppendLine($"Slice: {SliceCount:N0}   righe/slice min={MinRowsPerSlice} " +
                       $"avg={AvgRowsPerSlice} max={MaxRowsPerSlice}");
         sb.AppendLine($"Aggregati oversized: {OversizedCount:N0}");
+        if (_excludedCollectives.Count > 0)
+        {
+            sb.AppendLine("Collettivi esclusi e censiti (non verranno cancellati):");
+            foreach (var (reason, count) in _excludedCollectives.OrderBy(e => e.Key))
+                sb.AppendLine($"  {reason,-34}{count,14:N0}");
+        }
         if (UnassignedOrders > 0)
             sb.AppendLine($"ATTENZIONE: {UnassignedOrders:N0} ordini senza BatchNo");
         return sb.ToString();

@@ -85,6 +85,21 @@ public sealed class PurgeOptions
     [Range(1, 50)]
     public int MaxRunInterruptions { get; set; } = 5;
 
+    /// <summary>
+    /// Quante volte una slice puo' essere divisa in due prima che il
+    /// coordinatore rinunci e la abbandoni (D-11).
+    ///
+    /// La bisezione isola un aggregato che rifiuta la cancellazione in circa
+    /// 2·log2(N) transazioni invece di abbandonarne N. Il limite esiste per
+    /// il caso opposto: un difetto che sembra un errore di dati e non lo e'
+    /// fallirebbe ogni figlia, e senza freno il lavoro sprecato sarebbe
+    /// 2·N transazioni per scoprire una cosa sola. Con 2^10 > MaxOrdersPerBatch
+    /// massimo, il default arriva sempre fino al singolo aggregato. Zero
+    /// disattiva la bisezione e ripristina l'abbandono in blocco.
+    /// </summary>
+    [Range(0, 20)]
+    public int MaxSplitDepth { get; set; } = 10;
+
     public TimeSpan InterSliceDelay { get; set; } = TimeSpan.FromMilliseconds(100);
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(5);
 

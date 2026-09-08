@@ -43,7 +43,7 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         foreach (var script in new[]
                  { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
                    "006_collective_atomicity.sql", "008_audit_trail.sql",
-                   "010_run_lifecycle.sql", "011_policy_approval.sql" })
+                   "010_run_lifecycle.sql", "011_policy_approval.sql", "012_slice_split.sql" })
             await RunScriptAsync(script);
 
         Services = BuildServices();
@@ -152,14 +152,48 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         return services.BuildServiceProvider();
     }
 
-    private async Task RunScriptAsync(string fileName)
+    /// <summary>
+    /// Esegue un corpo su un database vuoto e separato, creato con i soli
+    /// script indicati e distrutto alla fine. Serve a provare l'installazione
+    /// da zero, che sul database della sessione — gia' migrato — non e'
+    /// osservabile: uno script incompleto passerebbe perche' le colonne ci
+    /// sono gia'.
+    /// </summary>
+    public async Task OnFreshDatabaseAsync(
+        IReadOnlyList<string> scripts, Func<SqlExecutor, Task> body)
+    {
+        var name = $"PaymentOrder_Install_{Guid.NewGuid():N}"[..40];
+        await ExecuteOnMasterAsync(
+            $"CREATE DATABASE [{name}] COLLATE SQL_Latin1_General_CP1_CI_AS;");
+
+        var cs = new SqlConnectionStringBuilder(MasterConnection) { InitialCatalog = name }
+            .ConnectionString;
+
+        try
+        {
+            foreach (var script in scripts)
+                await RunScriptAsync(script, cs);
+
+            await body(new SqlExecutor(cs));
+        }
+        finally
+        {
+            await ExecuteOnMasterAsync(
+                $"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; " +
+                $"DROP DATABASE [{name}];");
+        }
+    }
+
+    private Task RunScriptAsync(string fileName) => RunScriptAsync(fileName, ConnectionString);
+
+    private static async Task RunScriptAsync(string fileName, string connectionString)
     {
         var path = Path.Combine(AppContext.BaseDirectory, fileName);
         var text = await File.ReadAllTextAsync(path);
         var batches = Regex.Split(text, @"^\s*GO\s*$",
             RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
-        await using var conn = new SqlConnection(ConnectionString);
+        await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
 
         foreach (var batch in batches.Where(b => !string.IsNullOrWhiteSpace(b)))

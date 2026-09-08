@@ -123,7 +123,8 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
             OrderCount = r.GetInt32(1),
             EstimatedRowCount = r.GetInt32(2),
             AttemptCount = r.GetInt32(3),
-            IsOversized = r.GetBoolean(4)
+            IsOversized = r.GetBoolean(4),
+            SplitDepth = r.GetInt32(5)
         }, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
 
         return rows.Count == 0 ? null : rows[0];
@@ -242,6 +243,17 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
         return sql.ExecuteAsync(u, ct, SqlParam.Of("@RunId", runId),
             SqlParam.Of("@BatchNo", batchNo), SqlParam.Of("@Reason", reason));
     }
+
+    /// <summary>
+    /// Divide una slice in due figlie per aggregato (D-11). Restituisce quante
+    /// figlie ha creato: zero se la slice conteneva un aggregato solo, e in
+    /// quel caso non ha toccato niente e il chiamante deve abbandonare.
+    /// </summary>
+    public async Task<int> SplitSliceAsync(Guid runId, int batchNo, string? reason, CancellationToken ct) =>
+        await sql.ScalarAsync<int>(RetentionSql.SplitSlice, ct,
+            SqlParam.Of("@RunId", runId),
+            SqlParam.Of("@BatchNo", batchNo),
+            SqlParam.Of("@Reason", reason)).ConfigureAwait(false);
 
     public Task AbandonSliceAsync(Guid runId, int batchNo, string? reason, CancellationToken ct)
     {

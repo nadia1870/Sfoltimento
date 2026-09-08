@@ -2,6 +2,7 @@ using System.Data;
 using Microsoft.Extensions.Logging;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
+using OSM.PaymentOrder.Purge.Observability;
 using OSM.PaymentOrder.Purge.Sql;
 
 namespace OSM.PaymentOrder.Purge.Engine;
@@ -146,10 +147,17 @@ public sealed class StandingOrdersStrategy(BatchedStatementRunner batched, ILogg
 /// selezione ancora incompleta, ed e' una decisione che va presa a parte.
 /// La popolazione dei collettivi e' inoltre di un altro ordine di grandezza
 /// rispetto a quella degli ordini.
+///
+/// La selezione procede in tre tempi (D-10): eleggibili, esclusioni per
+/// motivo, componenti. Le esclusioni censiscono in RunCandidateCollective i
+/// collettivi che non si possono cancellare senza far fallire il run:
+/// prima arrivavano in Validating, che e' fail-hard, e un solo collettivo
+/// anomalo bloccava l'intera strategia notte dopo notte.
 /// </summary>
 public sealed class CollectiveStrategy(
     ISqlExecutor sql,
     BatchedStatementRunner batched,
+    PurgeMetrics metrics,
     ILogger<CollectiveStrategy> log)
     : PurgeStrategyBase(batched, log)
 {
@@ -164,6 +172,23 @@ public sealed class CollectiveStrategy(
         RetentionSql.SliceStatements(abandoned: false)
             .Concat(RetentionSql.CollectiveSliceStatements());
 
+    /// <summary>
+    /// Le esclusioni, nell'ordine in cui vengono applicate. Statiche perche'
+    /// derivano dalla topologia: una tabella di storico aggiunta a
+    /// PurgeTopology compare qui da sola.
+    /// </summary>
+    public static IEnumerable<(string Reason, string Sql)> ExclusionStatements()
+    {
+        yield return ("ComponentHasModel", RetentionSql.ExcludeCollectivesWithModel);
+        yield return ("AmbiguousMembership", RetentionSql.ExcludeAmbiguousCollectives);
+
+        foreach (var t in PurgeTopology.DetailHistoryTables)
+        {
+            yield return (RetentionSql.CrossReferenceReasonPrefix + t.Name,
+                          RetentionSql.ExcludeCollectivesWithCrossReference(t));
+        }
+    }
+
     public override async Task<int> SelectAsync(PurgeRun run, CancellationToken ct)
     {
         var p = new[]
@@ -171,6 +196,7 @@ public sealed class CollectiveStrategy(
             SqlParam.Of("@RunId", run.RunId),
             SqlParam.Typed("@Cutoff", CutoffOf(run), SqlDbType.DateTime2)
         };
+        var runP = SqlParam.Of("@RunId", run.RunId);
 
         var eligible = await _sql.ExecuteAsync(RetentionSql.SelectEligibleCollectives, ct, p)
             .ConfigureAwait(false);
@@ -178,9 +204,7 @@ public sealed class CollectiveStrategy(
         // Manteniamo il censimento degli anomalie della V3: e' una scrittura
         // intenzionale in Purge.RunCandidateCollective e non va persa nel refactoring.
         var withoutDate = await _sql.ExecuteAsync(
-            RetentionSql.SelectCollectivesWithoutDate,
-            ct,
-            SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
+            RetentionSql.SelectCollectivesWithoutDate, ct, runP).ConfigureAwait(false);
 
         if (withoutDate > 0)
         {
@@ -189,24 +213,44 @@ public sealed class CollectiveStrategy(
                 run.RunId, withoutDate);
         }
 
+        // Esclusioni per motivo. Ogni UPDATE restituisce quanti collettivi ha
+        // spostato in 'Excluded' in questo giro: alla riesecuzione dopo
+        // un'interruzione sono gia' esclusi e il conteggio e' zero, quindi il
+        // log riflette la selezione corrente e non lo stato accumulato.
+        var excluded = 0;
+        foreach (var (reason, statement) in ExclusionStatements())
+        {
+            ct.ThrowIfCancellationRequested();
+            var n = await _sql.ExecuteAsync(statement, ct, runP).ConfigureAwait(false);
+            if (n == 0) continue;
+
+            excluded += n;
+            metrics.CandidatesExcluded(reason, n);
+            log.LogWarning(
+                "PurgeCollectiveExcluded RunId={RunId} Motivo={Reason} Collettivi={Count} — " +
+                "censiti in RunCandidateCollective, non verranno cancellati.",
+                run.RunId, reason, n);
+        }
+
+        // Post-condizione, non piu' controllo di dominio: ExcludeAmbiguousCollectives
+        // ha appena rimosso le coppie. Un residuo qui e' un difetto di quella
+        // UPDATE e deve fermare il run, non essere gestito.
         var ambiguousOrders = await _sql.ScalarAsync<long>(
-            RetentionSql.ValidateOrderBelongsToSingleCollective,
-            ct,
-            SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
+            RetentionSql.ValidateOrderBelongsToSingleCollective, ct, runP).ConfigureAwait(false);
 
         if (ambiguousOrders > 0)
             throw new InvalidOperationException(
-                $"Run {run.RunId}: {ambiguousOrders} ordini appartengono a piu' Collective eleggibili; " +
-                "il purge atomico non puo' essere pianificato in modo sicuro.");
+                $"Run {run.RunId}: {ambiguousOrders} ordini appartengono ancora a piu' Collective " +
+                "selezionati dopo l'esclusione delle appartenenze ambigue: difetto in " +
+                "ExcludeAmbiguousCollectives.");
 
         var components = await _sql.ExecuteAsync(
-            RetentionSql.SelectCollectiveComponents,
-            ct,
-            SqlParam.Of("@RunId", run.RunId)).ConfigureAwait(false);
+            RetentionSql.SelectCollectiveComponents, ct, runP).ConfigureAwait(false);
 
         log.LogInformation(
-            "RunId={RunId} Strategy={Strategy} CollettiviEleggibili={Eligible} Componenti={Components}",
-            run.RunId, Type, eligible, components);
+            "RunId={RunId} Strategy={Strategy} CollettiviEleggibili={Eligible} Esclusi={Excluded} " +
+            "Componenti={Components}",
+            run.RunId, Type, eligible, excluded, components);
 
         // Stesso evento delle altre strategie: un formato diverso rompe le
         // query sui log e gli alert costruiti su questo nome.

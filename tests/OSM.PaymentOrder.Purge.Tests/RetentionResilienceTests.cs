@@ -176,7 +176,8 @@ public sealed class RetentionResilienceTests(PurgeDatabaseFixture db) : IAsyncLi
 
         var result = await executor.ExecuteAsync(run, slice!, default);
 
-        Assert.Equal(SliceOutcome.Retryable, result.Outcome);
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);   // D-12: si divide, non si riprova
 
         // Rollback integrale: nessuna riga cancellata, in nessuna tabella.
         Assert.Equal(3, await Seed.CountAsync("[Order]"));
@@ -187,11 +188,13 @@ public sealed class RetentionResilienceTests(PurgeDatabaseFixture db) : IAsyncLi
     }
 
     /// <summary>
-    /// Dopo MaxSliceAttempts la slice viene abbandonata e il run prosegue:
-    /// un singolo aggregato problematico non deve bloccare lo sfoltimento.
+    /// Un aggregato che non si puo' cancellare viene abbandonato e il run
+    /// prosegue: un singolo aggregato problematico non deve bloccare lo
+    /// sfoltimento. Con un ordine solo non c'e' niente da dividere (D-12):
+    /// lo store risponde zero figlie e l'abbandono e' immediato.
     /// </summary>
     [Fact]
-    public async Task Slice_ripetutamente_fallita_viene_abbandonata()
+    public async Task Slice_da_un_ordine_che_cambia_stato_viene_abbandonata()
     {
         var bloccante = await Seed.AddOrderAsync(revisions: 1);
 
@@ -201,14 +204,12 @@ public sealed class RetentionResilienceTests(PurgeDatabaseFixture db) : IAsyncLi
         var executor = db.Services.GetRequiredService<SliceExecutor>();
         var slice = await db.Store.NextPendingSliceAsync(run.RunId, default);
 
-        for (var attempt = 0; attempt < db.Options.MaxSliceAttempts; attempt++)
-        {
-            var result = await executor.ExecuteAsync(run, slice!, default);
-            Assert.Equal(SliceOutcome.Retryable, result.Outcome);
-            await db.Store.RecordAttemptAsync(run.RunId, slice!.BatchNo, result.Reason, default);
-        }
+        var result = await executor.ExecuteAsync(run, slice!, default);
+        Assert.Equal(SliceOutcome.Fatal, result.Outcome);
+        Assert.True(result.Splittable);
 
-        await db.Store.AbandonSliceAsync(run.RunId, slice!.BatchNo, "test", default);
+        Assert.Equal(0, await db.Store.SplitSliceAsync(run.RunId, slice!.BatchNo, result.Reason, default));
+        await db.Store.AbandonSliceAsync(run.RunId, slice!.BatchNo, result.Reason, default);
 
         var abbandonate = await db.Sql.ScalarAsync<long>("""
             SELECT COUNT_BIG(*) FROM Purge.RunBatchProgress

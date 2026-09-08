@@ -45,6 +45,16 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
                 report.Add(table, await sql.ScalarAsync<long>(RetentionSql.CountCollectiveAggregate(table), ct, p)
                                            .ConfigureAwait(false));
             }
+
+            // Cio' che il run ha deciso di NON cancellare, con il motivo (D-10).
+            // Chi approva il report deve vederlo quanto i conteggi: un
+            // collettivo escluso resta a database finche' qualcuno lo guarda.
+            var esclusi = await sql.QueryAsync(RetentionSql.CountExcludedCollectivesByReason,
+                r => (Reason: r.IsDBNull(0) ? "?" : r.GetString(0), Count: r.GetInt64(1)),
+                ct, p).ConfigureAwait(false);
+
+            foreach (var (reason, count) in esclusi)
+                report.AddExcludedCollectives(reason, count);
         }
 
         report.UnassignedOrders = await sql.ScalarAsync<long>(RetentionSql.CountUnassigned, ct, p)

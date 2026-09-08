@@ -93,14 +93,22 @@ public sealed class SliceExecutor(
             // esecuzione, la DELETE del gruppo 4 ne cancella meno del previsto.
             // Procedere lascerebbe a database un ordine privo di storico e
             // dettagli, che e' molto peggio del non fare nulla.
+            //
+            // Fatale e divisibile, non riprovabile (D-12). La DELETE ha
+            // atteso i lock delle transazioni concorrenti, quindi il conteggio
+            // riflette lo stato committato: l'ordine e' uscito dallo stato
+            // terminale davvero, e non ci tornera' fra cinque secondi.
+            // Riprovare la stessa slice costava tre tentativi per confermare
+            // una cosa gia' certa; dividerla isola l'ordine cambiato e lascia
+            // cancellare gli altri.
             if (strategy.PlanningMode != PurgePlanningMode.OrphanHistory && orderRows != slice.OrderCount)
             {
                 await session.RollbackAsync(ct).ConfigureAwait(false);
                 log.LogWarning(
-                    "PurgeSliceRetried RunId={RunId} BatchNo={BatchNo} Atteso={Expected} " +
-                    "Cancellato={Actual} Motivo=StatoOrdineCambiato",
+                    "PurgeSliceStatusChanged RunId={RunId} BatchNo={BatchNo} Atteso={Expected} " +
+                    "Cancellato={Actual} — slice annullata, divisibile",
                     run.RunId, slice.BatchNo, slice.OrderCount, orderRows);
-                return SliceResult.Retryable("StatusChangedDuringExecution");
+                return SliceResult.Fatal("StatusChangedDuringExecution", splittable: true);
             }
 
             if (auditLines.Count > 0)
@@ -168,9 +176,27 @@ public sealed class SliceExecutor(
         catch (Exception ex)
         {
             await SafeRollbackAsync(session, ct).ConfigureAwait(false);
-            log.LogError(ex, "PurgeSliceAbandoned RunId={RunId} BatchNo={BatchNo}",
-                run.RunId, slice.BatchNo);
-            return SliceResult.Fatal(ex.Message);
+
+            // Un errore di integrita' — FK violata, chiave duplicata — e' un
+            // dato che rifiuta la cancellazione, non un difetto del programma:
+            // il coordinatore puo' dividere la slice per isolarlo (D-11).
+            // Tutto il resto no: dividere un difetto lo moltiplica soltanto.
+            var splittable = ex is SqlException sqlEx && SqlErrors.IsDataIntegrity(sqlEx);
+
+            // Il motivo e' un codice corto, non il messaggio: finisce nel tag
+            // "reason" delle metriche, in RunBatchProgress.LastError e nella
+            // riga PurgeSliceSplit del coordinatore. Un messaggio di SQL
+            // Server — con nome del database, tabella e due righe di testo —
+            // rende il tag a cardinalita' illimitata e il log illeggibile. Il
+            // testo completo sta qui sotto, una volta, insieme allo stack.
+            var reason = ex is SqlException s ? $"Sql{s.Number}" : ex.GetType().Name;
+
+            log.LogError(ex,
+                "PurgeSliceFailed RunId={RunId} BatchNo={BatchNo} Ordini={Orders} " +
+                "Motivo={Reason} Divisibile={Splittable}",
+                run.RunId, slice.BatchNo, slice.OrderCount, reason, splittable);
+
+            return SliceResult.Fatal(reason, splittable);
         }
         finally
         {

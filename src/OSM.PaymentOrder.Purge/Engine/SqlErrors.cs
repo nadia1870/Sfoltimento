@@ -46,6 +46,19 @@ public static class SqlErrors
     ];
 
     /// <summary>
+    /// Errore di integrita' dei dati: una riga specifica rifiuta la
+    /// cancellazione o l'inserimento. Non e' un guasto e non passa da solo,
+    /// ma e' circoscritto a un aggregato: dividere la slice puo' isolarlo
+    /// (D-11). Lista chiusa come le altre, per la stessa ragione.
+    /// </summary>
+    private static readonly HashSet<int> DataIntegrity =
+    [
+        547,    // vincolo FK o CHECK violato
+        2627,   // violazione di chiave primaria o univoca
+        2601,   // indice univoco violato
+    ];
+
+    /// <summary>
     /// Guasto passeggero di qualunque natura: il run resta riprendibile.
     /// Serve all'orchestratore, che decide sul run intero.
     /// </summary>
@@ -66,4 +79,13 @@ public static class SqlErrors
     public static bool IsConcurrency(SqlException ex) => IsConcurrency(ex.Number);
 
     public static bool IsConcurrency(int number) => Concurrency.Contains(number);
+
+    /// <summary>
+    /// Errore di dati che giustifica la bisezione della slice. Volutamente
+    /// disgiunto da IsTransient: un 547 non si risolve riprovando, e un
+    /// deadlock non si risolve dividendo.
+    /// </summary>
+    public static bool IsDataIntegrity(SqlException ex) => IsDataIntegrity(ex.Number);
+
+    public static bool IsDataIntegrity(int number) => DataIntegrity.Contains(number);
 }
