@@ -33,6 +33,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\010_run_lifecycle.sql" Link="010_run_lifecycle.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="..\..\db\011_policy_approval.sql" Link="011_policy_approval.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
 
 <ItemGroup>

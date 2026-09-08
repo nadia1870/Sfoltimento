@@ -20,10 +20,12 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
         const string insert = """
             INSERT INTO Purge.PurgeRun
                 (RunId, Strategy, Phase, DryRun, AnchorMode, RetentionCutoff,
-                 AbandonedCutoff, MaxRowsPerBatch, MaxOrdersPerBatch, StartedOn)
+                 AbandonedCutoff, MaxRowsPerBatch, MaxOrdersPerBatch, StartedOn,
+                 PolicyHash)
             VALUES
                 (@RunId, @Strategy, 'Created', @DryRun, @AnchorMode, @Cutoff,
-                 @AbandonedCutoff, @MaxRows, @MaxOrders, SYSDATETIMEOFFSET());
+                 @AbandonedCutoff, @MaxRows, @MaxOrders, SYSDATETIMEOFFSET(),
+                 @PolicyHash);
             """;
 
         await sql.ExecuteAsync(insert, ct,
@@ -34,7 +36,10 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
             SqlParam.Typed("@Cutoff", options.ComputeRetentionCutoff(reference), SqlDbType.DateTime2),
             SqlParam.Typed("@AbandonedCutoff", options.ComputeAbandonedCutoff(reference), SqlDbType.DateTime2),
             SqlParam.Of("@MaxRows", options.MaxRowsPerBatch),
-            SqlParam.Of("@MaxOrders", options.MaxOrdersPerBatch)).ConfigureAwait(false);
+            SqlParam.Of("@MaxOrders", options.MaxOrdersPerBatch),
+            // Il run porta con se' la policy sotto cui e' girato: senza,
+            // dall'id di un dry-run non si risalirebbe a cosa fu esaminato.
+            SqlParam.Of("@PolicyHash", PurgePolicy.ComputeHash(options))).ConfigureAwait(false);
 
         return runId;
     }
@@ -123,6 +128,60 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
 
         return rows.Count == 0 ? null : rows[0];
     }
+
+    /// <summary>
+    /// L'approvazione per la policy indicata, o null se nessuno ha mai
+    /// esaminato un dry-run prodotto con questa configurazione su questo
+    /// database.
+    /// </summary>
+    public async Task<PolicyApproval?> FindApprovalAsync(string policyHash, CancellationToken ct)
+    {
+        var righe = await sql.QueryAsync("""
+            SELECT PolicyHash, DryRunRunId, ApprovedOn, ApprovedBy, Note
+            FROM Purge.PolicyApproval WHERE PolicyHash = @Hash;
+            """,
+            r => new PolicyApproval(
+                r.GetString(0), r.GetGuid(1), (DateTimeOffset)r.GetValue(2),
+                r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)),
+            ct, SqlParam.Of("@Hash", policyHash)).ConfigureAwait(false);
+
+        return righe.SingleOrDefault();
+    }
+
+    /// <summary>Modalita', esito e policy di un run: serve al comando di approvazione.</summary>
+    public async Task<(bool DryRun, RunPhase Phase, string? PolicyHash)?> ReadPolicyAsync(
+        Guid runId, CancellationToken ct)
+    {
+        var righe = await sql.QueryAsync("""
+            SELECT DryRun, Phase, PolicyHash FROM Purge.PurgeRun WHERE RunId = @RunId;
+            """,
+            r => (r.GetBoolean(0), Enum.Parse<RunPhase>(r.GetString(1)),
+                  r.IsDBNull(2) ? null : r.GetString(2)),
+            ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
+
+        return righe.Count == 0 ? null : righe[0];
+    }
+
+    /// <summary>
+    /// Registra un'approvazione. Riapprovare la stessa policy sovrascrive:
+    /// chi l'ha esaminata per ultimo e' chi ne risponde.
+    /// </summary>
+    public Task ApproveAsync(
+        string policyHash, Guid dryRunRunId, string approvedBy,
+        string policyText, string? note, CancellationToken ct) =>
+        sql.ExecuteAsync("""
+            MERGE Purge.PolicyApproval AS t
+            USING (SELECT @Hash AS PolicyHash) AS s ON t.PolicyHash = s.PolicyHash
+            WHEN MATCHED THEN UPDATE SET
+                DryRunRunId = @RunId, ApprovedOn = SYSDATETIMEOFFSET(),
+                ApprovedBy = @By, Note = @Note, PolicyText = @Text
+            WHEN NOT MATCHED THEN INSERT
+                (PolicyHash, DryRunRunId, ApprovedOn, ApprovedBy, PolicyText, Note)
+                VALUES (@Hash, @RunId, SYSDATETIMEOFFSET(), @By, @Text, @Note);
+            """, ct,
+            SqlParam.Of("@Hash", policyHash), SqlParam.Of("@RunId", dryRunRunId),
+            SqlParam.Of("@By", approvedBy), SqlParam.Of("@Text", policyText),
+            SqlParam.Of("@Note", note));
 
     /// <summary>
     /// Azzera il contatore delle interruzioni.

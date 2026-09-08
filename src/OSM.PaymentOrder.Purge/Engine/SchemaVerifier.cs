@@ -45,7 +45,7 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
         {
             "PurgeRun", "RunCandidateOrder", "RunCandidateOrderHistory",
             "RunCandidateCollective", "RunBatchProgress", "ValidationFinding",
-            "DryRunReport", "PurgeAudit"
+            "DryRunReport", "PurgeAudit", "PolicyApproval"
         })
             yield return $"Purge.{t}";
     }
@@ -64,6 +64,7 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
         ("Purge.PurgeAudit", "BatchNo", "008_audit_trail.sql"),
         ("Purge.PurgeRun", "InterruptionCount", "010_run_lifecycle.sql"),
         ("Purge.PurgeRun", "LastInterruptedOn", "010_run_lifecycle.sql"),
+        ("Purge.PurgeRun", "PolicyHash", "011_policy_approval.sql"),
     ];
 
     private const string ColumnQuery = """
