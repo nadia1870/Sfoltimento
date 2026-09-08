@@ -62,7 +62,10 @@ Cosa controllare in ciascun output:
 
 **000** — l'ultimo result set deve dire `Esito = OK`, `Tabelle = 9`,
 `Viste = 1`. Lo script è idempotente: se qualcosa è andato storto si può
-rieseguire.
+rieseguire. In alternativa, con un'utenza che ha permessi DDL,
+`purge migrate` fa la stessa cosa dal programma e registra in
+`Purge.SchemaVersions` cosa ha applicato; `purge migrate --status` dice se
+manca qualcosa (esce con 5) e non modifica niente.
 
 **004** — è la verifica più importante: confronta le foreign key *reali* con
 la topologia che il motore assume. Attese: `NO_ACTION` su tutte le FK

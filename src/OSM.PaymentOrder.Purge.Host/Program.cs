@@ -8,6 +8,7 @@ using OSM.PaymentOrder.Purge.Domain;
 using OSM.PaymentOrder.Purge.Engine;
 using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 using OSM.PaymentOrder.Purge.Engine.Phases;
+using OSM.PaymentOrder.Purge.Migrations;
 using OSM.PaymentOrder.Purge.Observability;
 
 namespace OSM.PaymentOrder.Purge.Host;
@@ -20,6 +21,8 @@ public static class Program
     ///   purge once --delete  [strat]   esecuzione reale
     ///   ... --no-window                ignora la chiusura della finestra
     ///   purge approve <run-id> --by <nome> [--note <testo>]
+    ///   purge migrate [--status]       allinea lo schema Purge (D-13);
+    ///                                  con --status elenca senza applicare
     ///   purge  (senza once)            servizio con cronjob interno,
     ///                                  dry-run per costruzione
     ///
@@ -45,6 +48,12 @@ public static class Program
         {
             using var approvazione = BuildHost(args, once: true);
             return await ApproveAsync(approvazione, args).ConfigureAwait(false);
+        }
+
+        if (comando == "migrate")
+        {
+            using var migrazione = BuildHost(args, once: true);
+            return Migrate(migrazione, args);
         }
 
         var once = comando == "once";
@@ -191,6 +200,42 @@ public static class Program
     }
 
     /// <summary>
+    /// Allinea lo schema Purge agli script incorporati (D-13). Comando
+    /// separato dall'esecuzione: il purge notturno non deve modificare lo
+    /// schema, e chi lo lancia deve avere permessi DDL che l'utenza del
+    /// purge non ha. Con --status non applica niente.
+    ///
+    /// Non e' un sostituto di 000_install_purge.sql per chi installa con
+    /// sqlcmd: e' l'equivalente tracciato, per chi preferisce che sia il
+    /// programma a dire cosa manca.
+    /// </summary>
+    private static int Migrate(IHost host, string[] args)
+    {
+        var migrator = host.Services.GetRequiredService<SchemaMigrator>();
+        var soloStato = args.Any(a => a.Equals("--status", StringComparison.OrdinalIgnoreCase));
+
+        try
+        {
+            var stato = migrator.Status();
+
+            Console.WriteLine($"Schema Purge: {stato.Applied.Count} script applicati, {stato.Pending.Count} da applicare.");
+            foreach (var s in stato.Pending) Console.WriteLine($"  da applicare: {s}");
+
+            if (soloStato) return stato.Pending.Count == 0 ? 0 : 5;
+
+            var applicati = migrator.Migrate();
+            foreach (var s in applicati) Console.WriteLine($"  applicato:    {s}");
+            Console.WriteLine(applicati.Count == 0 ? "Schema gia' allineato." : "Schema allineato.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Migrazione fallita: {ex.Message}");
+            return 2;
+        }
+    }
+
+    /// <summary>
     /// Rinuncia al limite di fine della finestra operativa. Esplicito di
     /// proposito: serve a un recupero o a un collaudo, non alla notte normale.
     /// </summary>
@@ -267,6 +312,10 @@ public static class Program
             sp => sp.GetRequiredService<SqlExecutor>());
 
         builder.Services.AddSingleton<SchemaVerifier>();
+        builder.Services.AddSingleton(sp => new SchemaMigrator(
+            cs,
+            sp.GetRequiredService<ILogger<SchemaMigrator>>(),
+            sp.GetRequiredService<IOptions<PurgeOptions>>().Value.CommandTimeoutSeconds));
         builder.Services.AddSingleton<PurgeHousekeeping>();
         builder.Services.AddSingleton<PurgeRunStore>();
         builder.Services.AddSingleton<BatchedStatementRunner>();

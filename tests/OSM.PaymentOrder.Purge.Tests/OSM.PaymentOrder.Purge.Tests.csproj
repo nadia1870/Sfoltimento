@@ -25,20 +25,6 @@
     <None Update="010_test_schema.sql"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
     <None Include="..\..\db\000_install_purge.sql" Link="000_install_purge.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\001_purge_schema.sql" Link="001_purge_schema.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\005_housekeeping.sql" Link="005_housekeeping.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\006_collective_atomicity.sql" Link="006_collective_atomicity.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\008_audit_trail.sql" Link="008_audit_trail.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\010_run_lifecycle.sql" Link="010_run_lifecycle.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\011_policy_approval.sql" Link="011_policy_approval.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
-    <None Include="..\..\db\012_slice_split.sql" Link="012_slice_split.sql">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
 
 <ItemGroup>

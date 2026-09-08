@@ -2,11 +2,13 @@ using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Engine;
 using OSM.PaymentOrder.Purge.Engine.BatchExecution;
 using OSM.PaymentOrder.Purge.Engine.Phases;
+using OSM.PaymentOrder.Purge.Migrations;
 using OSM.PaymentOrder.Purge.Observability;
 
 namespace OSM.PaymentOrder.Purge.Tests;
@@ -40,22 +42,39 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
         ConnectionString = builder.ConnectionString;
         Sql = new SqlExecutor(ConnectionString);
 
-        foreach (var script in new[]
-                 { "010_test_schema.sql", "001_purge_schema.sql", "005_housekeeping.sql",
-                   "006_collective_atomicity.sql", "008_audit_trail.sql",
-                   "010_run_lifecycle.sql", "011_policy_approval.sql", "012_slice_split.sql" })
-            await RunScriptAsync(script);
+        // Lo schema applicativo di prova via script; lo schema Purge via
+        // SchemaMigrator, cioe' lo stesso percorso di `purge migrate` (D-13).
+        // Cosi' ogni test di integrazione attraversa le migrazioni, e uno
+        // script nuovo dimenticato nel .csproj si vede subito, non in
+        // produzione.
+        await RunScriptAsync("010_test_schema.sql");
+        Migrator(ConnectionString).Migrate();
 
         Services = BuildServices();
     }
 
     public async Task DisposeAsync()
     {
-        await Services.DisposeAsync();
+        // Services e' nullo se InitializeAsync e' fallita a meta': il database
+        // va distrutto comunque, altrimenti ogni fallimento della fixture
+        // lascia un PurgeTests_* orfano sul server.
+        if (Services is not null) await Services.DisposeAsync();
+        if (string.IsNullOrEmpty(ConnectionString)) return;
+
         await ExecuteOnMasterAsync(
             $"ALTER DATABASE [{DatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; " +
             $"DROP DATABASE [{DatabaseName}];");
     }
+
+    /// <summary>
+    /// Migratore per un database di prova. La guardia sul nome e' disattivata:
+    /// i database della fixture si chiamano PurgeTests_* e PaymentOrder_Install_*.
+    /// </summary>
+    public static SchemaMigrator Migrator(string connectionString) =>
+        new(connectionString, NullLogger<SchemaMigrator>.Instance)
+        {
+            RequireDatabaseNameContains = null
+        };
 
     public PurgeOptions Options => Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
     public RetentionOrchestrator Orchestrator => Services.GetRequiredService<RetentionOrchestrator>();
