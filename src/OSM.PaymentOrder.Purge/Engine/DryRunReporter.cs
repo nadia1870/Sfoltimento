@@ -12,6 +12,10 @@ namespace OSM.PaymentOrder.Purge.Engine;
 /// </summary>
 public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log)
 {
+    private sealed record ExcludedRow(string? ExcludedReason, long Collectives);
+
+    private sealed record SliceStatsRow(int SliceCount, int MinRows, int MaxRows, int AvgRows, int Oversized);
+
     public async Task<DryRunReport> ProduceAsync(PurgeRun run, CancellationToken ct)
     {
         var report = new DryRunReport { RunId = run.RunId };
@@ -49,12 +53,11 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
             // Cio' che il run ha deciso di NON cancellare, con il motivo (D-10).
             // Chi approva il report deve vederlo quanto i conteggi: un
             // collettivo escluso resta a database finche' qualcuno lo guarda.
-            var esclusi = await sql.QueryAsync(RetentionSql.CountExcludedCollectivesByReason,
-                r => (Reason: r.IsDBNull(0) ? "?" : r.GetString(0), Count: r.GetInt64(1)),
-                ct, p).ConfigureAwait(false);
+            var esclusi = await sql.QueryAsync<ExcludedRow>(
+                RetentionSql.CountExcludedCollectivesByReason, ct, p).ConfigureAwait(false);
 
-            foreach (var (reason, count) in esclusi)
-                report.AddExcludedCollectives(reason, count);
+            foreach (var e in esclusi)
+                report.AddExcludedCollectives(e.ExcludedReason ?? "?", e.Collectives);
         }
 
         report.UnassignedOrders = await sql.ScalarAsync<long>(RetentionSql.CountUnassigned, ct, p)
@@ -66,14 +69,10 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
             ? RetentionSql.DryRunOrphanSliceStatistics
             : RetentionSql.DryRunSliceStatistics;
 
-        var stats = await sql.QueryAsync(sliceStatisticsSql, r => new
-        {
-            SliceCount = r.IsDBNull(0) ? 0 : r.GetInt32(0),
-            MinRows = r.IsDBNull(1) ? 0 : r.GetInt32(1),
-            MaxRows = r.IsDBNull(2) ? 0 : r.GetInt32(2),
-            AvgRows = r.IsDBNull(3) ? 0 : r.GetInt32(3),
-            Oversized = r.IsDBNull(4) ? 0 : r.GetInt32(4)
-        }, ct, p).ConfigureAwait(false);
+        // Un NULL (nessuna slice) diventa zero: Dapper lascia il default del
+        // tipo, che per int e' quello che il report si aspetta.
+        var stats = await sql.QueryAsync<SliceStatsRow>(sliceStatisticsSql, ct, p)
+            .ConfigureAwait(false);
 
         if (stats.Count > 0)
         {

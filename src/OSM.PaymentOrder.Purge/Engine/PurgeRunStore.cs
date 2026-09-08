@@ -65,6 +65,32 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
         return id == Guid.Empty ? null : id;
     }
 
+    /// <summary>
+    /// Forma delle righe di Purge.PurgeRun come le legge Dapper: i nomi sono
+    /// quelli delle colonne, gli enum arrivano come stringa e vengono
+    /// convertiti qui, cosi' un valore sconosciuto fallisce con il nome del
+    /// run e non con un errore di mapping.
+    /// </summary>
+    private sealed record PurgeRunRow(
+        Guid RunId, string Strategy, string Phase, bool DryRun, string AnchorMode,
+        DateTime RetentionCutoff, DateTime? AbandonedCutoff,
+        int MaxRowsPerBatch, int MaxOrdersPerBatch, int InterruptionCount)
+    {
+        public PurgeRun ToDomain() => new()
+        {
+            RunId = RunId,
+            Strategy = Enum.Parse<RetentionStrategy>(Strategy),
+            Phase = Enum.Parse<RunPhase>(Phase),
+            DryRun = DryRun,
+            AnchorMode = Enum.Parse<RetentionAnchorMode>(AnchorMode),
+            RetentionCutoff = RetentionCutoff,
+            AbandonedCutoff = AbandonedCutoff,
+            MaxRowsPerBatch = MaxRowsPerBatch,
+            MaxOrdersPerBatch = MaxOrdersPerBatch,
+            InterruptionCount = InterruptionCount
+        };
+    }
+
     public async Task<PurgeRun> LoadAsync(Guid runId, CancellationToken ct)
     {
         const string q = """
@@ -74,23 +100,12 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
             FROM Purge.PurgeRun WHERE RunId = @RunId;
             """;
 
-        var rows = await sql.QueryAsync(q, r => new PurgeRun
-        {
-            RunId = r.GetGuid(0),
-            Strategy = Enum.Parse<RetentionStrategy>(r.GetString(1)),
-            Phase = Enum.Parse<RunPhase>(r.GetString(2)),
-            DryRun = r.GetBoolean(3),
-            AnchorMode = Enum.Parse<RetentionAnchorMode>(r.GetString(4)),
-            RetentionCutoff = r.GetDateTime(5),
-            AbandonedCutoff = r.IsDBNull(6) ? null : r.GetDateTime(6),
-            MaxRowsPerBatch = r.GetInt32(7),
-            MaxOrdersPerBatch = r.GetInt32(8),
-            InterruptionCount = r.GetInt32(9)
-        }, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
+        var rows = await sql.QueryAsync<PurgeRunRow>(q, ct, SqlParam.Of("@RunId", runId))
+            .ConfigureAwait(false);
 
         return rows.Count == 0
             ? throw new InvalidOperationException($"Run {runId} inesistente.")
-            : rows[0];
+            : rows[0].ToDomain();
     }
 
     public Task SetPhaseAsync(Guid runId, RunPhase phase, CancellationToken ct, string? error = null)
@@ -115,19 +130,27 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
             SqlParam.Of("@Error", error));
     }
 
+    private sealed record SliceRow(
+        int BatchNo, int OrderCount, int EstimatedRowCount, int AttemptCount,
+        bool IsOversized, int SplitDepth)
+    {
+        public SliceInfo ToDomain() => new()
+        {
+            BatchNo = BatchNo,
+            OrderCount = OrderCount,
+            EstimatedRowCount = EstimatedRowCount,
+            AttemptCount = AttemptCount,
+            IsOversized = IsOversized,
+            SplitDepth = SplitDepth
+        };
+    }
+
     public async Task<SliceInfo?> NextPendingSliceAsync(Guid runId, CancellationToken ct)
     {
-        var rows = await sql.QueryAsync(RetentionSql.NextPendingSlice, r => new SliceInfo
-        {
-            BatchNo = r.GetInt32(0),
-            OrderCount = r.GetInt32(1),
-            EstimatedRowCount = r.GetInt32(2),
-            AttemptCount = r.GetInt32(3),
-            IsOversized = r.GetBoolean(4),
-            SplitDepth = r.GetInt32(5)
-        }, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
+        var rows = await sql.QueryAsync<SliceRow>(RetentionSql.NextPendingSlice, ct,
+            SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
 
-        return rows.Count == 0 ? null : rows[0];
+        return rows.Count == 0 ? null : rows[0].ToDomain();
     }
 
     /// <summary>
@@ -137,30 +160,28 @@ public sealed class PurgeRunStore(ISqlExecutor sql)
     /// </summary>
     public async Task<PolicyApproval?> FindApprovalAsync(string policyHash, CancellationToken ct)
     {
-        var righe = await sql.QueryAsync("""
+        // PolicyApproval e' gia' un record con i nomi delle colonne.
+        var righe = await sql.QueryAsync<PolicyApproval>("""
             SELECT PolicyHash, DryRunRunId, ApprovedOn, ApprovedBy, Note
             FROM Purge.PolicyApproval WHERE PolicyHash = @Hash;
-            """,
-            r => new PolicyApproval(
-                r.GetString(0), r.GetGuid(1), (DateTimeOffset)r.GetValue(2),
-                r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)),
-            ct, SqlParam.Of("@Hash", policyHash)).ConfigureAwait(false);
+            """, ct, SqlParam.Of("@Hash", policyHash)).ConfigureAwait(false);
 
         return righe.SingleOrDefault();
     }
 
     /// <summary>Modalita', esito e policy di un run: serve al comando di approvazione.</summary>
+    private sealed record PolicyRow(bool DryRun, string Phase, string? PolicyHash);
+
     public async Task<(bool DryRun, RunPhase Phase, string? PolicyHash)?> ReadPolicyAsync(
         Guid runId, CancellationToken ct)
     {
-        var righe = await sql.QueryAsync("""
+        var righe = await sql.QueryAsync<PolicyRow>("""
             SELECT DryRun, Phase, PolicyHash FROM Purge.PurgeRun WHERE RunId = @RunId;
-            """,
-            r => (r.GetBoolean(0), Enum.Parse<RunPhase>(r.GetString(1)),
-                  r.IsDBNull(2) ? null : r.GetString(2)),
-            ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
+            """, ct, SqlParam.Of("@RunId", runId)).ConfigureAwait(false);
 
-        return righe.Count == 0 ? null : righe[0];
+        return righe.Count == 0
+            ? null
+            : (righe[0].DryRun, Enum.Parse<RunPhase>(righe[0].Phase), righe[0].PolicyHash);
     }
 
     /// <summary>

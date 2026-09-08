@@ -79,5 +79,12 @@ public interface ISqlExecutor
     Task<List<TRow>> QueryAsync<TRow>(string sql, Func<IDataRecord, TRow> map,
                                       CancellationToken ct, params SqlParam[] parameters);
 
+    /// <summary>
+    /// Lettura mappata per nome di colonna (D-14). T e' di norma un record
+    /// posizionale i cui parametri hanno il nome delle colonne. Le lambda
+    /// posizionali di QueryAsync(map) restano per i test.
+    /// </summary>
+    Task<List<T>> QueryAsync<T>(string sql, CancellationToken ct, params SqlParam[] parameters);
+
     Task<IPurgeSession> BeginSessionAsync(CancellationToken ct);
 }

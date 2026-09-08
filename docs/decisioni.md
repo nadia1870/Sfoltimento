@@ -460,3 +460,101 @@ casi in cui la *stessa* slice, riprovata *uguale*, può passare.
 - Un ordine *già cancellato* da altri fra selezione ed esecuzione produce lo
   stesso rowcount inferiore e segue la stessa strada. È corretto: il candidato
   finisce `Failed`, e la traccia dice perché.
+
+---
+
+## D-13 — Lo schema Purge si allinea con DbUp, non con le migration di EF Core
+
+**Contesto.** `000_install_purge.sql` è derivato dalle migrazioni 005..012
+una volta (vedi il commit di pulizia), e ciò che mancava non era un modello
+ma il *tracciamento*: nessuno sapeva quali script fossero già passati su un
+database. Le migration EF Core risolvono il tracciamento, e la domanda è
+stata posta.
+
+**Decisione.** `purge migrate` applica gli script di `db/` — gli stessi
+file, incorporati nell'assembly — in ordine, uno per transazione,
+registrandoli in `Purge.SchemaVersions`. Lo fa DbUp. `000` resta lo script
+autonomo per chi installa con `sqlcmd`; `002` resta manuale.
+
+**Perché non EF.** Il vincolo del README — nessun `DbContext` — riguarda il
+contesto dell'*applicazione*, ferma a EF Core 3.1; un secondo contesto nel
+progetto Purge sarebbe possibile. Ma tre cose lo rendono la scelta sbagliata
+qui:
+
+1. Di ciò che c'è negli script, il model builder descriverebbe solo le nove
+   tabelle. La vista, nove indici filtrati, le `ALTER` idempotenti e le
+   verifiche finirebbero in `migrationBuilder.Sql("...")`: SQL raw dentro
+   C#, meno leggibile di com'è ora, e non più eseguibile dal DBA così com'è.
+2. `002_indexes.sql` tocca tabelle dell'applicazione, di proprietà delle
+   migration EF 3.1 dell'app. Un secondo contesto sullo stesso database
+   condivide `__EFMigrationsHistory` — o la si rinomina, e da quel momento
+   ogni migration dell'app vede indici che il suo modello non conosce.
+3. Il DBA rivede SQL, non C#. Con EF lo script è un derivato
+   (`migrations script --idempotent`); qui è la fonte.
+
+**Conseguenze.**
+
+- L'elenco degli script incorporati è nel `.csproj`, a mano.
+  `MigrationContractTests` impone la regola: ogni file di `db/` è una
+  migrazione salvo quelli esclusi con un motivo scritto nel test.
+- Un database installato con `000` ha già tutto e nessun journal. Il primo
+  `migrate` riesegue 001..0NN — idempotenti — e popola il journal. Non serve
+  un baseline manuale, e questa è la ragione per cui gli script devono
+  restare idempotenti.
+- La fixture dei test usa `SchemaMigrator` al posto dell'elenco di script:
+  ogni test di integrazione attraversa le migrazioni, e uno script
+  dimenticato nel `.csproj` fallisce lì, non in produzione.
+- `SchemaVerifier` resta invariato: dice se il database è allineato, non
+  come allinearlo. I due sono complementari, e il primo continua a girare
+  all'avvio di ogni esecuzione.
+- `migrate` è un comando separato da `once`: il purge notturno non modifica
+  lo schema, e chi allinea lo schema ha permessi DDL che l'utenza del purge
+  non ha. `--status` elenca senza applicare ed esce con 5 se manca qualcosa,
+  così uno scheduler può usarlo come controllo.
+- La guardia sul nome del database (`PaymentOrder`) è la stessa di `000`.
+  La fixture la disattiva per nome, non per caso.
+
+---
+
+## D-14 — Dapper dentro il livello dati, con la mappa `datetime2` come prima cosa
+
+**Contesto.** `SqlExecutor` e `SqlSession` costruivano i comandi a mano e
+leggevano per **posizione**: `r.GetInt32(5)`. Aggiungere `SplitDepth` a
+`NextPendingSlice` (D-11) ha richiesto di toccare la query *e* l'indice nello
+store; invertire due colonne sarebbe stato un bug silenzioso.
+
+**Decisione.** Dapper vive dentro `SqlExecutor` e `SqlSession`. `ISqlExecutor`
+e `IPurgeSession` non cambiano: i fake dei test restano identici, e
+`SliceExecutor` non sa che esiste. Le letture di produzione passano a
+`QueryAsync<T>`, mappato per nome su un `record` i cui parametri portano il
+nome delle colonne.
+
+**La mappa `DateTime → DbType.DateTime2` viene prima di tutto il resto.**
+Dapper, come `AddWithValue`, manda un `DateTime` come `SqlDbType.DateTime`,
+il cui minimo è il 1753. La filigrana della selezione paginata parte da
+`DateTime.MinValue`: senza la mappa, il valore verrebbe rifiutato dal client
+prima ancora di raggiungere il server, e la selezione si fermerebbe alla
+prima pagina. Era la ragione d'essere di `SqlParam.Typed`, che resta
+necessario per un'altra: un parametro **NULL** non ha un tipo deducibile dal
+valore.
+
+**Conseguenze.**
+
+- Le query di produzione devono dare un **alias** a ogni colonna calcolata:
+  `COUNT_BIG(*)` senza alias non ha un nome su cui mappare. Il rischio si
+  sposta da "colonna sbagliata in silenzio" a "proprietà a zero", che è
+  peggio se non ci si pensa — per questo `CountExcludedCollectivesByReason`
+  ha guadagnato `Collectives = COUNT_BIG(*)`, e per questo i record di riga
+  sono `private` accanto al metodo che li usa, dove si vedono insieme alla
+  query.
+- La conversione degli enum resta esplicita in `PurgeRunStore`: arrivano
+  come stringa e vengono convertiti in `ToDomain()`, così un valore
+  sconosciuto fallisce dicendo quale run lo contiene.
+- `QueryAsync(map)` posizionale resta su `ISqlExecutor` per i test e le
+  letture ad hoc, dove la query e la lambda si leggono a due righe di
+  distanza.
+- `SqlBulkCopy` in `BatchPlanner`, `DEADLOCK_PRIORITY LOW`, la transazione
+  esplicita, `READ COMMITTED` e i batch multi-statement non cambiano: Dapper
+  esegue ciò che gli si dà, e la politica del purge resta dove era.
+- `ScalarAsync<T>` delega a `ExecuteScalarAsync<T>`, che conserva il
+  comportamento precedente: NULL dal server diventa `default(T)`.

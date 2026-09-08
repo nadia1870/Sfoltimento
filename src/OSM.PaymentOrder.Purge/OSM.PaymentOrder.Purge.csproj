@@ -12,9 +12,28 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Migrazioni tracciate dello schema Purge (D-13). Solo SqlServer:
+         il core arriva transitivamente. -->
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="dbup-sqlserver" Version="5.0.41" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
+  </ItemGroup>
+
+  <!-- Script di migrazione incorporati, in ordine. Cosa NON e' qui e perche':
+       000 (installazione autonoma con sqlcmd), 002 (indici sulle tabelle
+       applicative: manuale, in finestra di manutenzione), 003/004/007/009
+       (verifiche) e 020/021 (analisi). MigrationContractTests controlla che
+       ogni altro script di db/ compaia in questo elenco. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\db\001_purge_schema.sql" Link="db\001_purge_schema.sql" />
+    <EmbeddedResource Include="..\..\db\005_housekeeping.sql" Link="db\005_housekeeping.sql" />
+    <EmbeddedResource Include="..\..\db\006_collective_atomicity.sql" Link="db\006_collective_atomicity.sql" />
+    <EmbeddedResource Include="..\..\db\008_audit_trail.sql" Link="db\008_audit_trail.sql" />
+    <EmbeddedResource Include="..\..\db\010_run_lifecycle.sql" Link="db\010_run_lifecycle.sql" />
+    <EmbeddedResource Include="..\..\db\011_policy_approval.sql" Link="db\011_policy_approval.sql" />
+    <EmbeddedResource Include="..\..\db\012_slice_split.sql" Link="db\012_slice_split.sql" />
   </ItemGroup>
 
 </Project>

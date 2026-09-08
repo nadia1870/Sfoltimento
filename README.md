@@ -36,12 +36,17 @@ docs/decisioni.md                   scelte non ovvie e perche'
 ## Avvio
 
 ```bash
-sqlcmd -S <host>,<porta> -d <database> -i db/000_install_purge.sql
+sqlcmd -S <host>,<porta> -d <database> -i db/000_install_purge.sql   # oppure: purge migrate
 sqlcmd -S <host>,<porta> -d <database> -i db/003_preflight.sql
 
 dotnet run --project src/OSM.PaymentOrder.Purge.Host              # servizio con cron
 dotnet run --project src/OSM.PaymentOrder.Purge.Host -- once      # esecuzione singola
+dotnet run --project src/OSM.PaymentOrder.Purge.Host -- migrate --status   # schema allineato?
 ```
+
+`purge migrate` applica gli script di `db/` mancanti registrandoli in
+`Purge.SchemaVersions` (D-13). Su un database installato con `000` la prima
+esecuzione popola solo il journal. `002_indexes.sql` resta manuale.
 
 ## Configurazione locale
 
