@@ -485,16 +485,77 @@ add(bullet("In simulazione il motore non percorre i rami distruttivi, e l'utenza
 add(bullet("La policy — anni di retention, ancoraggio, strategie attive — ha un'impronta crittografica. Prima di ogni esecuzione reale il motore verifica che quell'impronta sia stata approvata e registrata sul database. Cambiare un parametro invalida l'approvazione, e il motore se ne accorge."));
 add(bullet("Le foreign key non vengono mai disabilitate. Se una cancellazione lasciasse un riferimento pendente, il database la rifiuta: è la rete finale, indipendente da ogni logica applicativa."));
 
-add(H2("9.2 L'approvazione, in pratica"));
-add(P("Il flusso è deliberatamente scomodo, e la scomodità è il punto:"));
+add(H2("9.2 L'approvazione della policy"));
+add(rich(["L'approvazione è una sola, per policy e per database: non serve approvare ogni esecuzione. ", { b: 1 }],
+  "Approvata una volta, il job notturno gira indefinitamente senza intervento umano. Serve una nuova approvazione solo quando cambia ciò che verrebbe cancellato."));
+
+add(H3("Che cosa si approva"));
+add(P("Non un run, ma la regola. La policy è l'insieme dei parametri che determinano quali aggregati sono eleggibili, ridotti a un'impronta crittografica stabile:"));
+add(spacer());
+add(table(
+  ["Dentro l'impronta (fa decadere l'approvazione)", "Fuori dall'impronta (non la tocca)"],
+  [
+    ["RetentionYears — anni di conservazione\nAnchorMode — ancoraggio all'esercizio o alla data\nStrategies — quali strategie sono attive\nAbandonedEnabled — se gli abbandoni si cancellano\nAbandonedRetentionMonths — la loro soglia",
+     "MaxRowsPerBatch, MaxOrdersPerBatch — dimensione delle slice\nSelectionBatchSize — righe lette per pagina\nInterSliceDelay, RetryDelay — ritmo e ritentativi\nWindowStart, WindowEnd — finestra oraria\nMaxSplitDepth, MaxSliceAttempts — resilienza\nStagingRetentionDays — pulizia dello staging"]
+  ],
+  [4700, 4700]
+));
+add(P("La distinzione è deliberata e vale la pena capirla. I parametri di sinistra decidono cosa viene cancellato; quelli di destra decidono quanto lavoro si fa per volta. Se la dimensione delle slice facesse parte dell'impronta, tararla dopo il collaudo — cosa che va fatta di sicuro — invaliderebbe l'approvazione e bloccherebbe il job notturno per una modifica innocua. È così che un controllo di sicurezza perde credibilità e finisce disattivato."));
+
+add(H3("Come si ottiene"));
+add(P("Il percorso ha tre attori e non è aggirabile: chi esegue produce la simulazione, chi risponde della conformità la esamina, il DBA concede il permesso tecnico."));
 add(code([
-  "1.  purge once --dry-run                  simula e produce il report",
-  "2.  [ lettura del report, esame umano ]",
-  "3.  purge approve <run-id> --by \"<nome>\"  registra l'approvazione",
-  "4.  GRANT DELETE ...                      il DBA concede il permesso",
-  "5.  purge once --delete                   esecuzione reale"
+  "1.  purge once --dry-run                     simula e produce il report",
+  "        -> annotare il RunId stampato all'avvio",
+  "",
+  "2.  [ esame del report ]                     con Compliance / referente applicativo",
+  "",
+  "3.  purge approve <RunId> --by \"M. Rossi\" --note \"CR-1487\"",
+  "        -> registra l'approvazione della policy su questo database",
+  "",
+  "4.  GRANT DELETE ON SCHEMA::PaymentOrder ... il DBA, solo ora",
+  "",
+  "5.  purge once --delete                      esecuzione reale"
 ]));
-add(P("Ciò che si approva è la policy, non il singolo run: una sola approvazione copre tutte le strategie di quella configurazione. Il comando rifiuta un run che non sia una simulazione conclusa, e rifiuta di approvare una policy diversa da quella attualmente configurata."));
+add(P("Il comando di approvazione rifiuta, con un messaggio che dice quale delle quattro condizioni non è soddisfatta:"));
+add(bullet("un identificativo di run inesistente su questo database;"));
+add(bullet("un run che non è una simulazione — non si approva una cancellazione già avvenuta;"));
+add(bullet("una simulazione non conclusa: non ha prodotto un report completo;"));
+add(bullet("una simulazione girata con una policy diversa da quella configurata adesso. In questo caso stampa le due impronte a confronto: approvarla autorizzerebbe una cancellazione che nessuno ha esaminato."));
+add(rich("Il nome di chi approva è obbligatorio: un'approvazione senza un nome non è un'approvazione. Il campo ",
+  ["--note", { mono: 1 }], " è facoltativo ma andrebbe sempre valorizzato con il riferimento al documento che autorizza — verbale, ticket, richiesta di modifica: è ciò che collega la riga sul database alla decisione presa fuori."));
+
+add(H3("Che cosa viene registrato"));
+add(P("Una riga in Purge.PolicyApproval, con chiave l'impronta della policy: impronta, identificativo del dry-run di riferimento, data e ora, nome di chi approva, descrizione leggibile della policy e la nota. La descrizione è in chiaro proprio perché chi legge l'audit non deve interpretare un'impronta esadecimale:"));
+add(code([
+  "Retention=5 anni, Ancoraggio=FiscalYearEnd, Abbandonati=disattivi,",
+  "Strategie=[Terminated, StandingOrders, Collective, OrphanHistory]"
+]));
+
+add(H3("Come viene verificata, a ogni esecuzione"));
+add(P("Prima di ogni esecuzione reale — non solo la prima — il motore ricalcola l'impronta della configurazione corrente e cerca una riga di approvazione che le corrisponda. Se non la trova, rifiuta di partire, registra il motivo nel log ed esce con un codice diverso da zero: un purge che non parte in silenzio sembrerebbe riuscito, ed è il modo peggiore di fallire."));
+add(P("Il controllo sta nei punti di ingresso — riga di comando e scheduler — e non nell'orchestratore. Così i test di integrazione non hanno bisogno di aggirarlo: un aggiramento nei test è il primo passo verso un aggiramento in produzione."));
+add(note("La simulazione non richiede approvazione: non cancella nulla, e chiederla renderebbe impossibile produrre il report da approvare."));
+
+add(H3("Quando l'approvazione decade"));
+add(spacer());
+add(table(
+  ["Evento", "Serve riapprovare?", "Perché"],
+  [
+    ["Passa una notte, un mese, un anno", "No", "La policy non è cambiata: il job gira senza intervento."],
+    ["La soglia si sposta al 1° gennaio", "No", "È cambiato il calendario, non la regola. Con ancoraggio all'esercizio, un anno in più diventa eleggibile: è il comportamento approvato."],
+    ["Si tara la dimensione delle slice o la finestra oraria", "No", "Parametri operativi, fuori dall'impronta."],
+    ["Da 5 a 7 anni di retention", "Sì", "Cambia il perimetro di ciò che si conserva."],
+    ["Da FiscalYearEnd a RollingDate", "Sì", "Cambia il criterio di anzianità."],
+    ["Si attiva una strategia (per esempio Abandoned)", "Sì", "Entra in gioco una categoria di dati che nessuno ha esaminato."],
+    ["Si disattiva una strategia", "Sì", "L'impronta comprende l'elenco: cambia comunque, ed è corretto che qualcuno lo veda."],
+    ["Si aggiorna il software senza toccare la policy", "No", "L'approvazione vive nel database, non nel codice."],
+    ["Si esegue su un altro database (collaudo, nuovo ambiente)", "Sì", "L'approvazione non viaggia con il codice: là la tabella è vuota e va esaminato un dry-run prodotto su quei dati."],
+    ["Si ripristina il database da un backup precedente all'approvazione", "Sì", "La riga di approvazione è stata ripristinata via con il resto."]
+  ],
+  [3600, 1500, 4300]
+));
+add(P("Una policy approvata in passato e poi abbandonata resta registrata: tornare alla configurazione precedente riattiva l'approvazione originale, con il nome e la data di allora. È coerente — quella regola era stata esaminata — ma va saputo, perché significa che la riga più recente in tabella non è necessariamente quella in vigore. La policy in vigore è quella che corrisponde alla configurazione corrente."));
 
 add(H2("9.3 Che cosa si può dimostrare, a posteriori"));
 add(spacer());
