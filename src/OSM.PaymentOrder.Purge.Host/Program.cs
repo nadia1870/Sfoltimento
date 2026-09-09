@@ -107,25 +107,12 @@ public static class Program
         opzioni.DryRun = mode == PurgeExecutionMode.DryRun;
 
         // Il fuso della finestra non e' facoltativo quando si cancella davvero
-        // (D-20). Senza, la finestra e la pianificazione sono definite dal fuso
-        // della macchina — in un container quasi sempre UTC — e nessuno ha
-        // deciso che sia quello. Il rischio non e' teorico: su un host in UTC
-        // "01:00-05:00" diventa 02:00-06:00 italiane d'inverno, e il purge
-        // lavora un'ora dentro l'operativita' tutte le notti.
-        //
-        // La simulazione resta permissiva: serve a produrre il report da
-        // approvare, non tocca nulla, e pretendere il fuso li' bloccherebbe il
-        // percorso che porta all'approvazione.
-        if (mode == PurgeExecutionMode.Delete
-            && opzioni.WindowEnabled
-            && string.IsNullOrWhiteSpace(opzioni.TimeZoneId))
+        // (D-20). La logica sta in PurgeStartupGuard perche' dipende da una
+        // combinazione — modalita', finestra, --no-window, fuso — che va
+        // verificata per comportamento e non leggendo il sorgente.
+        if (PurgeStartupGuard.RejectionReason(mode, opzioni, args) is { } motivo)
         {
-            Console.Error.WriteLine(
-                "Esecuzione in modalita' DELETE rifiutata: Purge:TimeZoneId non e' " +
-                $"configurato, e la finestra {opzioni.WindowStart}-{opzioni.WindowEnd} " +
-                $"verrebbe letta nel fuso della macchina ({TimeZoneInfo.Local.Id}). " +
-                "Dichiarare il fuso, oppure disattivare la finestra con " +
-                $"{NoWindowFlag} se e' una scelta consapevole.");
+            Console.Error.WriteLine(motivo);
             return 2;
         }
 
@@ -264,7 +251,7 @@ public static class Program
     /// Rinuncia al limite di fine della finestra operativa. Esplicito di
     /// proposito: serve a un recupero o a un collaudo, non alla notte normale.
     /// </summary>
-    public const string NoWindowFlag = "--no-window";
+    public const string NoWindowFlag = PurgeStartupGuard.NoWindowFlag;
 
     private static string? ValoreOpzione(string[] args, string nome)
     {

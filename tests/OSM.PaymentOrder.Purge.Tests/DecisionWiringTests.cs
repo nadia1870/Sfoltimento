@@ -148,16 +148,20 @@ public sealed class DecisionWiringTests
     /// Il controllo sta prima del gate: rifiutare per configurazione mancante
     /// e' piu' preciso che rifiutare per policy non approvata, e i due motivi
     /// non vanno confusi nel messaggio.
+    ///
+    /// Questo test verifica solo che la guardia sia invocata e dove. Che dica
+    /// la cosa giusta lo verifica StartupGuardTests, per comportamento: la
+    /// distinzione conta, perche' la prima versione della guardia era
+    /// invocata nel posto giusto e sbagliava la condizione.
     /// </summary>
     [Fact]
     public void L_esecuzione_reale_pretende_un_fuso_dichiarato()
     {
         var program = Sorgente("Program.cs");
 
-        Assert.Contains("mode == PurgeExecutionMode.Delete", program);
-        Assert.Contains("string.IsNullOrWhiteSpace(opzioni.TimeZoneId)", program);
+        Assert.Contains("PurgeStartupGuard.RejectionReason(mode, opzioni, args)", program);
 
-        var posizioneControllo = program.IndexOf("string.IsNullOrWhiteSpace(opzioni.TimeZoneId)",
+        var posizioneControllo = program.IndexOf("PurgeStartupGuard.RejectionReason",
             StringComparison.Ordinal);
         var posizioneGate = program.IndexOf("gate.IsAllowedAsync(", StringComparison.Ordinal);
         Assert.True(posizioneControllo < posizioneGate,
