@@ -30,6 +30,7 @@ src/OSM.PaymentOrder.Purge/         motore
 src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
 
 docs/architettura/                  disegno funzionale e tecnico (.docx) e sorgenti
+docs/disegno-cancellazione-su-richiesta.md  proposta: cancellazione per relazione e per DynacosPaymentId
 docs/runbook-primo-dry-run.md       procedura per la prima simulazione in produzione
 docs/runbook-prima-esecuzione-reale.md  procedura per il primo --delete
 docs/decisioni.md                   scelte non ovvie e perche'
@@ -115,3 +116,4 @@ il checkpoint divergono, uno dei due mente e nessuno dei due e' utilizzabile.
 | PA-5 | Serve un meccanismo di legal hold? | Legal |
 | PA-7 | Collettivi con `ExecutionDate` NULL: oggi esclusi e censiti | Business |
 | PA-21 | Soglia degli ordini abbandonati (`AbandonedEnabled` è `false`) | Business / Compliance |
+| PA-30..50 | Cancellazione su richiesta (relazione debitore, DynacosPaymentId): vedi `docs/disegno-cancellazione-su-richiesta.md` | Legal / Business |
