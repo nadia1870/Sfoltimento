@@ -251,7 +251,7 @@ add(table(
     ["RetentionOrchestrator", "Governa il workflow: esegue una fase, persiste la transizione, gestisce interruzioni e ripresa", "Non esegue SQL di dominio"],
     ["IPurgeStrategy", "Definisce l'eleggibilità: quali aggregati entrano nel run", "Non decide come e quando cancellarli"],
     ["BatchPlanner", "Legge i candidati a pagine e li dà in pasto al packer", "Non decide la composizione delle slice"],
-    ["BatchPacker", "Assegna i candidati alle slice rispettando i limiti", "Non accede al database: è una funzione pura"],
+    ["BatchPacker", "Assegna i candidati alle slice rispettando i limiti", "Non accede al database: deterministico e privo di I/O"],
     ["BatchExecutionCoordinator", "Politica di esecuzione: finestra oraria, ritentativi, bisezione, abbandono, ritmo", "Non conosce la persistenza né il SQL"],
     ["SliceExecutor", "Il confine transazionale: una slice, una transazione", "Non decide cosa fare in caso di errore: classifica e riporta"],
     ["PurgeHousekeeping", "Sfoltisce lo staging del purge stesso", "Non tocca i dati di dominio né l'audit"]
@@ -405,8 +405,10 @@ add(H3("Perché i tetti sono due"));
 add(P("«Si accetta un picco di lock» è vero fino a un certo peso e falso oltre. Un collettivo da duecento componenti con molte revisioni può valere centomila righe: cancellarlo in una sola transazione innesca la lock escalation e gonfia il log, cioè esattamente ciò che questo capitolo esiste per evitare. Il primo tetto dimensiona la slice; il secondo dice fino a dove il picco è accettabile."));
 add(P("Sopra il secondo tetto l'aggregato viene messo da parte con un motivo, compare nel report e resta a database finché qualcuno decide come trattarlo (D-17). Spezzarlo sarebbe l'alternativa: per un collettivo è escluso dall'atomicità, per un ordine singolo richiederebbe un meccanismo nuovo con una propria atomicità da dimostrare, per un caso che dovrebbe essere raro. Escludere e censire costa niente e rende il caso misurabile; se il censimento mostrasse che è frequente, allora varrebbe la pena costruire lo spezzamento."));
 
-add(H2("6.3 Il packer è una funzione pura"));
-add(P("La composizione delle slice non accede al database, non apre connessioni e non decide l'eleggibilità: riceve una sequenza di candidati con il loro peso e restituisce assegnazioni. Questo la rende verificabile in modo esaustivo con test in memoria, senza database — ed è il motivo per cui i casi limite (aggregato sovradimensionato, collettivo a cavallo di due slice, ordine senza peso) sono coperti da test rapidi e deterministici."));
+add(H2("6.3 Il packer è deterministico e privo di I/O"));
+add(P("La composizione delle slice non accede al database, non apre connessioni e non decide l'eleggibilità: riceve una sequenza di candidati con il loro peso e restituisce assegnazioni. A parità di sequenza in ingresso produce sempre lo stesso risultato."));
+add(P("Non è però una funzione pura: è un accumulatore, e mantiene lo stato del batch in costruzione — quanto pesa, quanti aggregati contiene, se un collettivo è a metà. Serve perché i componenti di uno stesso collettivo arrivano su chiamate successive e devono finire nella stessa slice. La distinzione conta per chi legge il codice aspettandosi una funzione senza stato; ciò che conta architetturalmente è l'assenza di I/O, non l'assenza di stato."));
+add(P("È questo che rende la composizione verificabile in modo esaustivo con test in memoria, senza database, ed è il motivo per cui i casi limite — aggregato sovradimensionato, aggregato oltre il tetto, collettivo a cavallo di due slice, ordine senza peso — sono coperti da test rapidi e deterministici."));
 add(note("La lettura dei candidati usa paginazione per chiave (keyset) invece che per offset: si ricorda l'ultima coppia (data, id) letta e si riprende da lì. Con OFFSET la pagina numero mille richiederebbe a SQL Server di scorrere e scartare le novecentonovantanove precedenti."));
 add(pageBreak());
 
@@ -638,7 +640,8 @@ add(table(
   ],
   [2100, 2500, 4800]
 ));
-add(note("La finestra oraria vale in entrambe le modalità, anche nell'esecuzione singola. Non è ridondante: lo scheduler decide quando partire, ma solo la finestra decide quando fermarsi. Un avvio fuori finestra esce con codice 4 senza fare nulla, e il log segnala che pianificazione e finestra configurata non concordano."));
+add(note("La finestra oraria vale in entrambe le modalità, anche nell'esecuzione singola. Non è ridondante: lo scheduler decide quando partire, ma solo la finestra decide quando fermarsi. Un avvio fuori finestra esce con codice 4 senza fare nulla, e il log segnala che pianificazione e finestra configurata non concordano. L'unico modo di rinunciare al limite è chiederlo esplicitamente con --no-window, che viene registrato nel log."));
+add(P("In modalità servizio il fuso dichiarato governa anche la pianificazione interna, non solo la finestra. I due erano rimasti disallineati fino a poco fa: su un host in UTC il servizio si sarebbe svegliato due ore dopo l'apertura della finestra, perdendo due ore di lavoro ogni notte senza che nulla lo segnalasse."));
 
 add(H2("10.4 I comandi, uno per uno"));
 add(spacer());
@@ -744,7 +747,7 @@ add(table(
     ["D-15", "Deriva dello schema rilevata all'avvio", "Solo la verifica manuale: una tabella nuova legata a Order si sarebbe manifestata di notte, come aggregati abbandonati uno per uno."],
     ["D-16", "Finestra in un fuso dichiarato, scadenza come istante", "Fuso dell'host e differenza fra orari: in un container il fuso è UTC, e nella notte di primavera la scadenza concedeva un'ora in più."],
     ["D-17", "Tetto al peso del singolo aggregato", "Nessun limite superiore: un collettivo da centomila righe diventa la transazione che il packing esiste per evitare."],
-    ["B-1", "Packer separato e privo di I/O", "Packing dentro il planner: non verificabile senza database."],
+    ["B-1", "Packer separato e privo di I/O", "Packing dentro il planner: non verificabile senza database. Il packer ha stato — serve a tenere insieme un collettivo — ma non tocca il database."],
     ["B-2", "Reader chiuso prima della bulk copy", "Reader aperto: conflitto sulla stessa sessione SQL."],
     ["HK-1", "Housekeeping distinto dal purge di dominio", "Un'unica procedura: audit e staging hanno esigenze di conservazione opposte."]
   ],

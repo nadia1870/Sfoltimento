@@ -698,3 +698,47 @@ costruire lo spezzamento.
   contiene il loro ordine.
 - Il default va tarato sul p99 reale dopo il primo dry-run. Un valore troppo
   basso trasforma in esclusioni aggregati che il motore reggerebbe.
+
+---
+
+## D-18 — Le decisioni collegate al runtime hanno un test che lo dice
+
+**Contesto.** Una revisione esterna ha sostenuto — sulla base di una copia
+non aggiornata del repository — che il gate di approvazione, la modalità da
+riga di comando e il tetto per aggregato fossero implementati ma non
+invocati. L'affermazione era falsa, e verificarla ha richiesto di aprire tre
+file.
+
+Il punto però non è chi avesse ragione: **non era falsificabile**. Nessun
+test diceva che quei collegamenti esistessero, e nessuno si sarebbe accorto
+se qualcuno li avesse rimossi. Un componente di sicurezza scollegato è
+indistinguibile da uno assente, e scollegarlo è un'operazione di una riga:
+togliere una chiamata, cambiare un default, dimenticare un parametro.
+
+**Decisione.** `DecisionWiringTests` verifica il collegamento delle decisioni
+che, se scollegate, fallirebbero in silenzio: il gate interrogato prima
+dell'esecuzione, la modalità presa dalla riga di comando e non dalla
+configurazione, il tetto per aggregato che arriva fino al packer, il fuso
+usato dalla pianificazione, l'assenza di letture dirette dell'orologio
+dell'host, la finestra disattivabile solo su richiesta esplicita.
+
+**Perché controlli sul testo del sorgente.** Sono grezzi, e lo dichiarano.
+L'alternativa — avviare l'host in un test e osservarne il comportamento —
+costerebbe molto di più e verificherebbe la stessa cosa. Questi test non
+provano che il sistema funzioni, provano che un collegamento non sia stato
+tolto; per il resto ci sono i test di integrazione. Un falso allarme si
+risolve in trenta secondi, un collegamento perso in silenzio no.
+
+**Nella stessa revisione** è emerso un difetto reale: `RetentionCronService`
+interpretava l'espressione cron con `TimeZoneInfo.Local` mentre la finestra
+usava il fuso dichiarato (D-16). Su un host in UTC il servizio si sarebbe
+svegliato due ore dopo l'apertura della finestra, perdendo due ore di lavoro
+ogni notte senza alcun errore. Convertendo le letture dell'orologio avevo
+mancato quella riga: la pianificazione non legge l'ora, la interpreta.
+
+**Conseguenza sul documento.** `BatchPacker` era descritto come «funzione
+pura» mentre il codice dichiara di essere un accumulatore con stato. La
+formulazione corretta è *deterministico e privo di I/O*: ciò che conta
+architetturalmente è che non tocchi il database, non che sia privo di stato —
+lo stato serve a tenere insieme i componenti di un collettivo che arrivano su
+chiamate successive.
