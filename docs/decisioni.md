@@ -701,6 +701,53 @@ costruire lo spezzamento.
 
 ---
 
+## D-19 — Il tetto per aggregato fa parte della policy approvata
+
+**Contesto.** D-16 e D-17 avevano classificato `MaxAggregateWeight` fra i
+parametri operativi, fuori dall'impronta della policy, per analogia con
+`MaxRowsPerBatch`. Era sbagliato, e una revisione esterna lo ha individuato.
+
+`MaxRowsPerBatch` cambia in quante transazioni si divide il lavoro:
+l'insieme cancellato resta identico. `MaxAggregateWeight` decide se un
+aggregato viene cancellato o resta a database. È perimetro, non prestazione.
+
+**Il caso concreto.** Si approva una simulazione con il tetto a 30 000, e il
+report mostra un collettivo da 80 000 fra gli aggregati esclusi: chi approva
+sta approvando anche quell'esclusione. Alzando poi il tetto a 100 000 senza
+che l'impronta cambi, quell'aggregato diventerebbe cancellabile con
+un'approvazione che nessuno ha dato per lui — esattamente ciò che il gate
+esiste per impedire.
+
+**Decisione.** `MaxAggregateWeight` entra nell'impronta e nella descrizione
+leggibile della policy. Cambiarlo, in qualunque direzione, richiede una nuova
+approvazione.
+
+**Perché anche nella direzione che cancella meno.** Abbassare il tetto
+esclude più aggregati, quindi cancella meno: non è pericoloso. Ma il gate non
+approva un livello di rischio, approva un perimetro, e un perimetro diverso
+va esaminato — se non altro perché chi legge il rapporto di chiusura deve
+poter sapere quale tetto era in vigore.
+
+**Conseguenza operativa.** Le approvazioni già registrate decadono: l'impronta
+cambia per tutte. Va rifatto un dry-run e una nuova approvazione prima della
+prossima esecuzione reale. Su un sistema non ancora in produzione è gratuito;
+dopo lo sarebbe stato molto meno, ed è la ragione per cui questa correzione
+non poteva aspettare.
+
+**Il criterio, per le prossime volte.** Un parametro entra nell'impronta se
+esiste un dato che, al variare del parametro, passa da cancellato a non
+cancellato o viceversa. Non conta quanto sia importante, né quanto sia
+probabile che qualcuno lo cambi.
+
+**Due prove, non una.** `ExecutionModeTests` verifica l'aritmetica —
+l'impronta cambia — e `ApprovalGateTests` verifica il percorso reale: con il
+tetto alzato il gate rifiuta l'esecuzione. La seconda è quella che conta,
+perché il gate potrebbe smettere di consultare l'impronta senza che
+l'aritmetica se ne accorga. Tornando al valore approvato l'approvazione
+riprende a valere: si approva una policy, non un momento nel tempo.
+
+---
+
 ## D-18 — Le decisioni collegate al runtime hanno un test che lo dice
 
 **Contesto.** Una revisione esterna ha sostenuto — sulla base di una copia

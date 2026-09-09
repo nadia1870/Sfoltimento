@@ -512,12 +512,14 @@ add(spacer());
 add(table(
   ["Dentro l'impronta (fa decadere l'approvazione)", "Fuori dall'impronta (non la tocca)"],
   [
-    ["RetentionYears — anni di conservazione\nAnchorMode — ancoraggio all'esercizio o alla data\nStrategies — quali strategie sono attive\nAbandonedEnabled — se gli abbandoni si cancellano\nAbandonedRetentionMonths — la loro soglia",
-     "MaxRowsPerBatch, MaxOrdersPerBatch — dimensione delle slice\nSelectionBatchSize — righe lette per pagina\nInterSliceDelay, RetryDelay — ritmo e ritentativi\nWindowStart, WindowEnd — finestra oraria\nMaxSplitDepth, MaxSliceAttempts — resilienza\nStagingRetentionDays — pulizia dello staging"]
+    ["RetentionYears — anni di conservazione\nAnchorMode — ancoraggio all'esercizio o alla data\nStrategies — quali strategie sono attive\nAbandonedEnabled — se gli abbandoni si cancellano\nAbandonedRetentionMonths — la loro soglia\nMaxAggregateWeight — il tetto oltre il quale un aggregato non viene cancellato",
+     "MaxRowsPerBatch, MaxOrdersPerBatch — dimensione delle slice\nSelectionBatchSize — righe lette per pagina\nInterSliceDelay, RetryDelay — ritmo e ritentativi\nWindowStart, WindowEnd, WindowGrace, TimeZoneId — finestra oraria\nMaxSplitDepth, MaxSliceAttempts — resilienza\nStagingRetentionDays — pulizia dello staging"]
   ],
   [4700, 4700]
 ));
 add(P("La distinzione è deliberata e vale la pena capirla. I parametri di sinistra decidono cosa viene cancellato; quelli di destra decidono quanto lavoro si fa per volta. Se la dimensione delle slice facesse parte dell'impronta, tararla dopo il collaudo — cosa che va fatta di sicuro — invaliderebbe l'approvazione e bloccherebbe il job notturno per una modifica innocua. È così che un controllo di sicurezza perde credibilità e finisce disattivato."));
+add(P("Il criterio non è l'importanza del parametro, ed è per questo che il tetto per aggregato sta a sinistra mentre la dimensione delle slice sta a destra, benché si assomiglino. La dimensione delle slice cambia in quante transazioni si divide il lavoro: l'insieme cancellato resta identico. Il tetto per aggregato decide se un aggregato viene cancellato o resta a database, e quindi appartiene al perimetro."));
+add(note("Il caso concreto: si approva una simulazione con il tetto a 30 000 righe, e il report mostra un collettivo da 80 000 fra gli aggregati esclusi. Chi approva sta approvando anche quell'esclusione. Se il tetto venisse poi alzato a 100 000 senza che l'impronta cambi, quell'aggregato diventerebbe cancellabile con un'approvazione che nessuno ha dato per lui — esattamente ciò che il gate esiste per impedire."));
 
 add(H3("Come si ottiene"));
 add(P("Il percorso ha tre attori e non è aggirabile: chi esegue produce la simulazione, chi risponde della conformità la esamina, il DBA concede il permesso tecnico."));
@@ -651,16 +653,17 @@ add(table(
     ["purge migrate", "Applica gli script di schema mancanti. Richiede permessi DDL."],
     ["purge migrate --status", "Elenca cosa manca senza applicare nulla. Esce con 0 se allineato, 5 altrimenti: utilizzabile come controllo automatico."],
     ["purge once --dry-run", "Simula tutte le strategie configurate. Nessuna cancellazione, produce il report."],
-    ["purge once --dry-run Terminated", "Simula una sola strategia."],
+    ["purge once Terminated --dry-run", "Simula una sola strategia."],
     ["purge approve <run-id> --by <nome> [--note <rif>]", "Registra l'approvazione della policy sotto cui è girato quel dry-run."],
     ["purge once --delete", "Esecuzione reale, tutte le strategie configurate."],
-    ["purge once --delete OrphanHistory", "Esecuzione reale di una sola strategia."],
+    ["purge once OrphanHistory --delete", "Esecuzione reale di una sola strategia."],
     ["purge once --delete --no-window", "Esecuzione reale senza il limite di fine finestra."],
     ["purge", "Servizio con pianificazione interna, in sola simulazione."]
   ],
   [4200, 5200], [0]
 ));
-add(rich("Il nome della strategia, quando presente, va subito dopo la modalità e non distingue maiuscole e minuscole. I valori ammessi sono ",
+add(rich("Il nome della strategia, quando presente, va indicato subito dopo ", ["once", { mono: 1 }],
+  " e prima della modalità: viene letto dal secondo argomento. Non distingue maiuscole e minuscole. I valori ammessi sono ",
   ["Terminated", { mono: 1 }], ", ", ["StandingOrders", { mono: 1 }], ", ", ["Collective", { mono: 1 }], ", ",
   ["OrphanHistory", { mono: 1 }], ", ", ["Abandoned", { mono: 1 }],
   ". Omettendolo si eseguono tutte le strategie configurate, in sequenza, ciascuna come run separato con un proprio identificatore."));
@@ -673,7 +676,7 @@ add(H3("Prima installazione su un database nuovo"));
 add(code([
   "purge migrate --status                            # cosa manca",
   "purge migrate                                     # applica",
-  "purge once --dry-run OrphanHistory --no-window    # prova di fumo, di giorno",
+  "purge once OrphanHistory --dry-run --no-window    # prova di fumo, di giorno",
   "purge once --dry-run                              # simulazione completa, di notte"
 ]));
 add(H3("Dalla simulazione alla prima cancellazione"));
@@ -682,7 +685,7 @@ add(code([
   "#    [ esame del report con Compliance ]",
   "purge approve 3f2a... --by \"M. Rossi\" --note \"CR-1487\"",
   "#    [ il DBA concede DELETE all'utenza del purge ]",
-  "purge once --delete OrphanHistory                 # prima notte, una strategia",
+  "purge once OrphanHistory --delete                 # prima notte, una strategia",
   "purge once --delete                               # a regime, tutte"
 ]));
 add(H3("Un run interrotto che riprende"));
@@ -841,32 +844,40 @@ add(table(
 ));
 
 add(H1("Appendice B — Parametri di configurazione"));
-add(P("I valori indicati sono i default. Quelli marcati vanno tarati sui numeri reali prima della prima esecuzione."));
+add(P("I valori indicati sono i default. La colonna a destra dice che cosa va deciso prima della prima esecuzione reale, e distingue i parametri che fanno parte della policy approvata da quelli che si possono cambiare in qualsiasi momento."));
 add(spacer());
 add(table(
-  ["Parametro", "Default", "Effetto"],
+  ["Parametro", "Default", "Effetto e stato"],
   [
-    ["RetentionYears", "5", "Anni di conservazione. Fa parte della policy approvata."],
-    ["AnchorMode", "FiscalYearEnd", "Modo di ancoraggio della soglia. Fa parte della policy approvata."],
-    ["Strategies", "tutte tranne Abandoned", "Strategie attive. Fa parte della policy approvata."],
-    ["MaxRowsPerBatch  ▲", "3000", "Tetto di righe per slice: tiene la transazione sotto la soglia di lock escalation."],
-    ["MaxOrdersPerBatch  ▲", "500", "Tetto di aggregati per slice."],
+    ["RetentionYears", "5", "Anni di conservazione. Nella policy approvata."],
+    ["AnchorMode", "FiscalYearEnd", "Ancoraggio della soglia. Nella policy approvata."],
+    ["Strategies", "tutte tranne Abandoned", "Strategie attive. Nella policy approvata."],
+    ["AbandonedEnabled", "false", "Strategia degli ordini mai completati (PA-21). Nella policy approvata."],
+    ["AbandonedRetentionMonths", "24", "Soglia degli abbandoni. Nella policy approvata."],
+    ["MaxAggregateWeight", "30 000", "Peso oltre il quale l'aggregato è escluso invece di essere cancellato. Zero disattiva il limite. Nella policy approvata: cambia il perimetro. Da tarare sui pesi reali."],
+    ["TimeZoneId", "(fuso dell'host)", "Fuso in cui si leggono la finestra e la pianificazione interna. Da valorizzare in produzione: il default eredita il fuso della macchina, che in un container è quasi sempre UTC."],
+    ["WindowStart / WindowEnd", "01:00 / 05:00", "Finestra operativa, nel fuso dichiarato. Da tarare."],
+    ["WindowGrace", "5 minuti", "Tolleranza oltre la chiusura concessa a una fase lunga per terminare in modo ordinato invece di essere troncata."],
+    ["CronExpression", "0 1 * * *", "Pianificazione interna della modalità servizio, interpretata nel fuso dichiarato."],
+    ["MaxRowsPerBatch", "3000", "Tetto di righe per slice: tiene la transazione sotto la soglia di lock escalation. Da tarare."],
+    ["MaxOrdersPerBatch", "500", "Tetto di aggregati per slice."],
     ["SelectionBatchSize", "4000", "Righe lette per pagina in selezione ed espansione."],
+    ["InterSliceDelay", "100 ms", "Pausa fra una slice e l'altra: la leva principale sull'impatto all'operatività. Da tarare."],
     ["MaxSliceAttempts", "3", "Tentativi su una slice in caso di contesa."],
-    ["MaxAggregateWeight  ▲", "30 000", "Peso oltre il quale l'aggregato è escluso invece di essere cancellato. Zero disattiva il limite."],
-    ["TimeZoneId  ▲", "(fuso dell'host)", "Fuso in cui si leggono WindowStart e WindowEnd. Da valorizzare in produzione."],
+    ["RetryDelay", "5 secondi", "Attesa fra un tentativo e il successivo."],
     ["MaxSplitDepth", "10", "Bisezioni massime prima di abbandonare. Zero disattiva la bisezione."],
     ["MaxRunInterruptions", "5", "Interruzioni tollerate prima di dichiarare il run fallito."],
-    ["InterSliceDelay  ▲", "100 ms", "Pausa fra una slice e l'altra: è la leva principale sull'impatto all'operatività."],
-    ["WindowStart / WindowEnd  ▲", "01:00 / 05:00", "Finestra oraria, nell'ora locale dell'host."],
+    ["HousekeepingEnabled", "true", "Pulizia dello staging al termine del ciclo."],
     ["StagingRetentionDays", "7", "Conservazione dello staging dei run conclusi senza incidenti."],
     ["FailedStagingRetentionDays", "90", "Conservazione dello staging dei run falliti o con abbandoni."],
-    ["AbandonedEnabled", "false", "Strategia degli ordini mai completati (PA-21)."],
-    ["CommandTimeoutSeconds", "300", "Timeout dei comandi SQL."]
+    ["HousekeepingBatchSize", "4000", "Righe cancellate per giro dalla pulizia dello staging."],
+    ["HousekeepingMaxRunsPerCycle", "50", "Run ripuliti al massimo per ciclo."],
+    ["CommandTimeoutSeconds", "300", "Timeout dei comandi SQL."],
+    ["AuditBaselineEnabled", "true", "Produce il report previsionale anche sui run reali, per il confronto con l'audit."]
   ],
-  [3000, 1500, 4900], [0]
+  [2700, 1600, 5100], [0]
 ));
-add(note("▲ = da tarare sui numeri reali prima della prima esecuzione."));
+add(note("I parametri della policy approvata non si possono cambiare senza una nuova approvazione: il motore ricalcola l'impronta a ogni esecuzione reale e si ferma se non la trova registrata (§9.2)."));
 
 // ---------------------------------------------------------------- documento
 const doc = new Document({

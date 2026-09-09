@@ -128,6 +128,11 @@ public sealed class PurgePolicyTests
     /// Le manopole di prestazione restano fuori. Tararle dopo il collaudo non
     /// deve invalidare un'approvazione e bloccare il job notturno per una
     /// modifica che non cambia cosa viene cancellato.
+    ///
+    /// Il criterio non e' l'importanza del parametro ma il suo effetto: questi
+    /// cambiano quanto lavoro si fa per volta, non quale insieme di aggregati
+    /// sparisce. MaxRowsPerBatch e' il caso di confine — decide la dimensione
+    /// delle transazioni — ma l'insieme cancellato resta identico.
     /// </summary>
     [Fact]
     public void Le_manopole_di_prestazione_non_cambiano_l_impronta()
@@ -140,8 +145,58 @@ public sealed class PurgePolicyTests
         b.WindowEnabled = false;
         b.HousekeepingEnabled = false;
         b.CommandTimeoutSeconds = 60;
+        b.InterSliceDelay = TimeSpan.FromSeconds(1);
+        b.MaxSplitDepth = 3;
+        b.TimeZoneId = "Europe/Rome";
 
         Assert.Equal(PurgePolicy.ComputeHash(a), PurgePolicy.ComputeHash(b));
+    }
+
+    /// <summary>
+    /// Il tetto per aggregato invece e' perimetro, non prestazione (D-17).
+    ///
+    /// Si approva un dry-run con il tetto a 30.000 e il report mostra un
+    /// collettivo da 80.000 fra gli esclusi: chi approva sta approvando anche
+    /// quell'esclusione. Alzare poi il tetto a 100.000 renderebbe cancellabile
+    /// quell'aggregato con l'approvazione precedente, che nessuno ha dato per
+    /// lui — ed e' esattamente cio' che il gate esiste per impedire.
+    /// </summary>
+    [Fact]
+    public void Cambiare_il_tetto_per_aggregato_cambia_l_impronta()
+    {
+        var a = Base();
+        var b = Base();
+        b.MaxAggregateWeight = a.MaxAggregateWeight * 3;
+
+        Assert.NotEqual(PurgePolicy.ComputeHash(a), PurgePolicy.ComputeHash(b));
+    }
+
+    /// <summary>Vale anche nella direzione che cancella meno: e' comunque un perimetro diverso.</summary>
+    [Fact]
+    public void Disattivare_il_tetto_per_aggregato_cambia_l_impronta()
+    {
+        var a = Base();
+        var b = Base();
+        b.MaxAggregateWeight = 0;
+
+        Assert.NotEqual(PurgePolicy.ComputeHash(a), PurgePolicy.ComputeHash(b));
+    }
+
+    /// <summary>
+    /// La descrizione leggibile deve nominare il tetto: chi approva legge
+    /// quella, non l'impronta.
+    /// </summary>
+    [Fact]
+    public void La_descrizione_nomina_il_tetto_per_aggregato()
+    {
+        var o = Base();
+        o.MaxAggregateWeight = 30_000;
+
+        Assert.Contains("TettoAggregato", PurgePolicy.Describe(o));
+        Assert.Contains("30", PurgePolicy.Describe(o));
+
+        o.MaxAggregateWeight = 0;
+        Assert.Contains("nessuno", PurgePolicy.Describe(o));
     }
 
     /// <summary>

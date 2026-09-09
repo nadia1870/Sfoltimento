@@ -77,6 +77,41 @@ public sealed class ApprovalGateTests(PurgeDatabaseFixture db) : IAsyncLifetime
     }
 
     /// <summary>
+    /// D-19: alzare il tetto per aggregato invalida l'approvazione.
+    ///
+    /// E' il caso end-to-end del ragionamento di D-19. Si approva con il tetto
+    /// a 30 000 e il report mostra un collettivo da 80 000 fra gli esclusi:
+    /// chi approva sta approvando anche quell'esclusione. Alzando il tetto,
+    /// quell'aggregato diventerebbe cancellabile con un'approvazione che
+    /// nessuno ha dato per lui, e il gate deve accorgersene.
+    ///
+    /// Il test sull'impronta in ExecutionModeTests verifica la stessa cosa
+    /// sull'aritmetica; questo la verifica sul percorso reale, che e' quello
+    /// che decide se una cancellazione parte.
+    /// </summary>
+    [Fact]
+    public async Task Alzare_il_tetto_per_aggregato_invalida_l_approvazione()
+    {
+        await ApprovaPolicyCorrenteAsync();
+        Assert.True(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+
+        var originale = db.Options.MaxAggregateWeight;
+        try
+        {
+            db.Options.MaxAggregateWeight = originale == 0 ? 30_000 : originale * 3;
+            Assert.False(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+        }
+        finally
+        {
+            db.Options.MaxAggregateWeight = originale;
+        }
+
+        // Tornando al valore approvato l'approvazione riprende a valere: e'
+        // la policy a essere approvata, non un momento nel tempo.
+        Assert.True(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+    }
+
+    /// <summary>
     /// Tarare le manopole di prestazione non deve bloccare il job notturno:
     /// e' il falso allarme che farebbe disattivare il controllo.
     /// </summary>
@@ -143,6 +178,42 @@ public sealed class ApprovalGateTests(PurgeDatabaseFixture db) : IAsyncLifetime
         Assert.True(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
 
         await db.Sql.ExecuteAsync("DELETE FROM Purge.PolicyApproval;", default);
+
+        Assert.False(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+    }
+
+    /// <summary>
+    /// D-19: alzare il tetto per aggregato invalida l'approvazione.
+    ///
+    /// E' il caso che il gate esiste per intercettare, ed e' la prova
+    /// end-to-end di D-19: si approva una policy in cui un aggregato da 80.000
+    /// righe resta escluso, poi si alza il tetto a 100.000. Senza il tetto
+    /// nell'impronta, quell'aggregato diventerebbe cancellabile con
+    /// un'approvazione che nessuno ha dato per lui.
+    /// </summary>
+    [Fact]
+    public async Task Alzare_il_tetto_da_30000_a_100000_invalida_l_approvazione()
+    {
+        var opzioni = db.Options;
+        opzioni.MaxAggregateWeight = 30_000;
+
+        await ApprovaPolicyCorrenteAsync();
+        Assert.True(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+
+        opzioni.MaxAggregateWeight = 100_000;
+
+        Assert.False(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
+    }
+
+    /// <summary>Vale anche disattivandolo: e' comunque un perimetro diverso.</summary>
+    [Fact]
+    public async Task Disattivare_il_tetto_per_aggregato_invalida_l_approvazione()
+    {
+        var opzioni = db.Options;
+        opzioni.MaxAggregateWeight = 30_000;
+
+        await ApprovaPolicyCorrenteAsync();
+        opzioni.MaxAggregateWeight = 0;
 
         Assert.False(await Gate.IsAllowedAsync(PurgeExecutionMode.Delete, default));
     }

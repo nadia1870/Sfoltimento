@@ -17,8 +17,10 @@ public static class Program
 {
     /// <summary>
     /// Due modalita':
-    ///   purge once --dry-run [strat]   simulazione, nessuna cancellazione
-    ///   purge once --delete  [strat]   esecuzione reale
+    ///   purge once [strat] --dry-run   simulazione, nessuna cancellazione
+    ///   purge once [strat] --delete    esecuzione reale
+    ///                                  (la strategia, se indicata, va SUBITO
+    ///                                   dopo 'once': viene letta da args[1])
     ///   ... --no-window                ignora la chiusura della finestra
     ///   purge approve <run-id> --by <nome> [--note <testo>]
     ///   purge migrate [--status]       allinea lo schema Purge (D-13);
