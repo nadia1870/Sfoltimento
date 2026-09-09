@@ -524,42 +524,120 @@ add(rich("Tutte le tabelle del motore vivono in uno schema separato, ", ["Purge"
   " dice cosa manca senza applicare nulla."));
 add(note("Gli indici sulle tabelle applicative restano esclusi dalle migrazioni automatiche: operano su tabelle grandi e in uso, e vanno applicati dal DBA in finestra di manutenzione. Senza quegli indici la selezione scandisce l'intera tabella degli ordini a ogni pagina."));
 
-add(H2("10.2 I comandi"));
+add(H2("10.2 Come si avvia l'applicazione"));
+add(P("Il motore è un eseguibile a riga di comando. In produzione si usa la versione pubblicata; in sviluppo si può lanciare dal repository."));
+add(code([
+  "# produzione (artefatto pubblicato)",
+  "dotnet publish -c Release src/OSM.PaymentOrder.Purge.Host -o /opt/purge",
+  "/opt/purge/OSM.PaymentOrder.Purge.Host once --dry-run",
+  "",
+  "# sviluppo (dal repository)",
+  "dotnet run --project src/OSM.PaymentOrder.Purge.Host -- once --dry-run"
+]));
+add(rich("Negli esempi che seguono ", ["purge", { mono: 1 }],
+  " sta per l'eseguibile pubblicato, o per ", ["dotnet run --project ... --", { mono: 1 }],
+  ": tutto ciò che segue è identico nei due casi."));
+add(note("Il processo legge appsettings.json dalla cartella dell'eseguibile, non dalla cartella corrente. Un lancio da un'altra directory funziona; un eseguibile copiato altrove senza il suo appsettings no."));
+
+add(H3("Configurazione"));
+add(P("I parametri arrivano da tre fonti, in ordine di precedenza crescente: appsettings.json accanto all'eseguibile, appsettings.<Ambiente>.json, variabili d'ambiente. In produzione la stringa di connessione va nelle variabili, non nel file."));
+add(P("Le variabili usano il prefisso PURGE_ e il doppio underscore come separatore di livello:"));
+add(code([
+  "PURGE_ConnectionStrings__PaymentOrder=Server=host,1433;Database=...;User Id=...;Password=...;Encrypt=true",
+  "PURGE_Purge__RetentionYears=5",
+  "PURGE_Purge__AnchorMode=FiscalYearEnd",
+  "PURGE_Purge__WindowStart=01:00",
+  "PURGE_Purge__WindowEnd=05:00"
+]));
+add(rich(["La modalità non è configurabile. ", { b: 1 }],
+  "Non esistono variabili PURGE_DRY_RUN o PURGE_DELETE: la scelta fra simulazione e cancellazione è una proprietà del comando, non dell'ambiente in cui gira (§9.1, livello 2). Senza modalità il comando non esegue nulla ed esce con codice 2."));
+
+add(H2("10.3 Le due modalità di esecuzione"));
+add(spacer());
+add(table(
+  ["Modalità", "Come si avvia", "Comportamento"],
+  [
+    ["Esecuzione singola", "purge once …", "Esegue una volta e termina, restituendo un codice di uscita. È la modalità pensata per uno scheduler esterno (UC4, cron, Task Scheduler), che decide quando eseguire e raccoglie l'esito."],
+    ["Servizio", "purge  (senza argomenti)", "Resta in esecuzione e si autopianifica secondo CronExpression. È dry-run per costruzione: non può cancellare. Chiedere --delete in questa modalità viene rifiutato, non degradato in silenzio a simulazione."]
+  ],
+  [2100, 2500, 4800]
+));
+add(note("La finestra oraria vale in entrambe le modalità, anche nell'esecuzione singola. Non è ridondante: lo scheduler decide quando partire, ma solo la finestra decide quando fermarsi. Un avvio fuori finestra esce con codice 4 senza fare nulla, e il log segnala che pianificazione e finestra configurata non concordano."));
+
+add(H2("10.4 I comandi, uno per uno"));
 add(spacer());
 add(table(
   ["Comando", "Effetto"],
   [
-    ["purge migrate [--status]", "Allinea lo schema Purge, o ne riporta lo stato"],
-    ["purge once --dry-run [Strategia]", "Simula: nessuna cancellazione, produce il report"],
-    ["purge approve <run-id> --by \"<nome>\"", "Registra l'approvazione della policy"],
-    ["purge once --delete [Strategia]", "Esecuzione reale"],
-    ["purge", "Servizio con pianificazione interna"]
+    ["purge migrate", "Applica gli script di schema mancanti. Richiede permessi DDL."],
+    ["purge migrate --status", "Elenca cosa manca senza applicare nulla. Esce con 0 se allineato, 5 altrimenti: utilizzabile come controllo automatico."],
+    ["purge once --dry-run", "Simula tutte le strategie configurate. Nessuna cancellazione, produce il report."],
+    ["purge once --dry-run Terminated", "Simula una sola strategia."],
+    ["purge approve <run-id> --by <nome> [--note <rif>]", "Registra l'approvazione della policy sotto cui è girato quel dry-run."],
+    ["purge once --delete", "Esecuzione reale, tutte le strategie configurate."],
+    ["purge once --delete OrphanHistory", "Esecuzione reale di una sola strategia."],
+    ["purge once --delete --no-window", "Esecuzione reale senza il limite di fine finestra."],
+    ["purge", "Servizio con pianificazione interna, in sola simulazione."]
   ],
-  [3600, 5800], [0]
+  [4200, 5200], [0]
 ));
+add(rich("Il nome della strategia, quando presente, va subito dopo la modalità e non distingue maiuscole e minuscole. I valori ammessi sono ",
+  ["Terminated", { mono: 1 }], ", ", ["StandingOrders", { mono: 1 }], ", ", ["Collective", { mono: 1 }], ", ",
+  ["OrphanHistory", { mono: 1 }], ", ", ["Abandoned", { mono: 1 }],
+  ". Omettendolo si eseguono tutte le strategie configurate, in sequenza, ciascuna come run separato con un proprio identificatore."));
+add(rich(["--no-window", { mono: 1 }], " rinuncia al limite di fine finestra. Esiste per i recuperi e i collaudi, viene registrato nel log come richiesta esplicita, e con ",
+  ["--delete", { mono: 1 }], " in produzione non andrebbe usato senza una ragione scritta: la finestra è ciò che tiene il purge lontano dall'operatività."));
+add(note("Un'istanza alla volta: all'avvio il motore prende un lock applicativo sul database. Se un'altra istanza sta già girando, il processo esce subito con codice 0 e un avviso nel log — non fallisce, perché una sovrapposizione dello scheduler non è un errore da segnalare come tale."));
 
-add(H2("10.3 Codici di uscita"));
+add(H2("10.5 Sessioni tipo"));
+add(H3("Prima installazione su un database nuovo"));
+add(code([
+  "purge migrate --status                            # cosa manca",
+  "purge migrate                                     # applica",
+  "purge once --dry-run OrphanHistory --no-window    # prova di fumo, di giorno",
+  "purge once --dry-run                              # simulazione completa, di notte"
+]));
+add(H3("Dalla simulazione alla prima cancellazione"));
+add(code([
+  "purge once --dry-run                              # produce il report",
+  "#    [ esame del report con Compliance ]",
+  "purge approve 3f2a... --by \"M. Rossi\" --note \"CR-1487\"",
+  "#    [ il DBA concede DELETE all'utenza del purge ]",
+  "purge once --delete OrphanHistory                 # prima notte, una strategia",
+  "purge once --delete                               # a regime, tutte"
+]));
+add(H3("Un run interrotto che riprende"));
+add(P("Nessun comando speciale: si rilancia lo stesso comando. Il motore trova il run non concluso e riparte dal checkpoint, sullo stesso insieme di candidati congelato."));
+add(code([
+  "purge once --delete                               # esce con 5: finestra superata",
+  "#    [ la notte successiva, stesso comando ]",
+  "purge once --delete                               # riprende da dove si era fermato"
+]));
+
+add(H2("10.6 Codici di uscita"));
+add(P("L'esecuzione singola comunica l'esito allo scheduler tramite il codice di uscita. Due di questi non sono guasti."));
 add(spacer());
 add(table(
   ["Codice", "Significato", "Azione"],
   [
     ["0", "Concluso", "Analisi del giorno dopo"],
     ["1", "Una strategia è fallita", "Esaminare l'errore: il run non riprende"],
-    ["2", "Configurazione o schema non validi", "Nulla è stato cancellato"],
-    ["4", "Fuori dalla finestra oraria", "Nulla è stato cancellato"],
-    ["5", "Finestra superata durante una fase lunga", "Normale sui volumi grandi: riprende la notte dopo"],
-    ["130", "Interrotto", "Riprende dal checkpoint"]
+    ["2", "Modalità assente, configurazione o schema non validi", "Nulla è stato cancellato"],
+    ["4", "Avvio fuori dalla finestra oraria", "Nulla è stato cancellato"],
+    ["5", "Finestra superata durante una fase lunga", "Non è un guasto: riprende la notte dopo"],
+    ["130", "Interrotto (Ctrl-C o arresto del job)", "Non è un guasto: riprende dal checkpoint"]
   ],
   [1000, 4600, 3800]
 ));
+add(note("Sui volumi di produzione le prime notti finiranno quasi sempre con 5. Chi sorveglia i job va avvisato in anticipo, altrimenti il primo 5 viene trattato come un incidente."));
 
-add(H2("10.4 Osservabilità"));
+add(H2("10.7 Osservabilità"));
 add(P("Il motore emette eventi di log con nomi stabili, pensati per essere interrogati: avvio e conclusione del run, selezione completata, collettivo escluso, slice divisa, slice fallita, run interrotto. Le metriche esposte contano righe cancellate, slice completate, abbandonate e divise, e misurano la durata delle slice."));
 add(rich("Due segnali meritano un allarme: una crescita di ", ["purge.slices_abandoned", { mono: 1 }],
   " indica dati che rifiutano la cancellazione; una crescita regolare di ", ["purge.slices_split", { mono: 1 }],
   " indica che i dati cambiano fra selezione ed esecuzione più spesso di quanto il disegno assuma — ed è quello il problema da guardare, non la bisezione."));
 
-add(H2("10.5 Procedure operative"));
+add(H2("10.8 Procedure operative"));
 add(P("Due documenti separati coprono l'esecuzione, con il dettaglio passo per passo che qui sarebbe fuori luogo:"));
 add(bullet("docs/runbook-primo-dry-run.md — la prima simulazione in produzione: prerequisiti, permessi, verifiche preliminari, lettura del report, approvazione."));
 add(bullet("docs/runbook-prima-esecuzione-reale.md — la prima cancellazione: backup verificato, taratura, sorveglianza della prima notte, analisi del giorno dopo, messa a regime."));
