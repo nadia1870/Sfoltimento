@@ -730,6 +730,26 @@ manderebbe chi legge a cercare un'approvazione che non serve.
 bisogno di eseguire senza limite orario: è già esplicita e registrata nel log,
 e chi la usa sta dichiarando di sapere cosa fa.
 
+**Correzione successiva.** La prima versione della guardia viveva dentro
+`Program` e leggeva solo `WindowEnabled`, mentre `--no-window` veniva
+interpretato più tardi, dentro `RunOnceAsync`. Il risultato è che
+`purge once --delete --no-window` senza fuso veniva rifiutato **dalla stessa
+guardia che suggeriva `--no-window` come rimedio**: la via d'uscita era chiusa
+dal messaggio che la proponeva.
+
+Il difetto è sfuggito perché la decisione era coperta solo da un controllo di
+collegamento (D-18), che verifica che la guardia sia invocata e dove, non che
+la condizione sia giusta. La logica è stata estratta in
+`PurgeStartupGuard.RejectionReason(mode, options, args)` — una funzione, quindi
+verificabile per comportamento — e coperta da otto casi che percorrono tutte le
+combinazioni di modalità, finestra, flag e fuso.
+
+**La lezione, che vale oltre questo caso.** Un test di collegamento dice che il
+componente è al suo posto; non dice che faccia la cosa giusta. Servono
+entrambi, e quando una decisione dipende da una *combinazione* di condizioni,
+la guardia va estratta in una funzione invece di restare annidata in un
+percorso che si può verificare solo eseguendolo.
+
 ---
 
 ## D-19 — Il tetto per aggregato fa parte della policy approvata
