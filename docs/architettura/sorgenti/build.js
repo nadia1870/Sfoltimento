@@ -248,6 +248,7 @@ add(table(
   ["Componente", "Responsabilità", "Cosa NON fa"],
   [
     ["RetentionCronService / Host", "Decide quando eseguire e con quale modalità; traduce l'esito in un codice di uscita", "Non conosce le regole di eleggibilità"],
+    ["PurgeStartupGuard", "I controlli di configurazione che precedono ogni cancellazione reale", "Non decide se la policy è approvata: è il livello successivo"],
     ["RetentionOrchestrator", "Governa il workflow: esegue una fase, persiste la transizione, gestisce interruzioni e ripresa", "Non esegue SQL di dominio"],
     ["IPurgeStrategy", "Definisce l'eleggibilità: quali aggregati entrano nel run", "Non decide come e quando cancellarli"],
     ["BatchPlanner", "Legge i candidati a pagine e li dà in pasto al packer", "Non decide la composizione delle slice"],
@@ -502,6 +503,13 @@ add(bullet("La modalità — simulazione o cancellazione — si indica obbligato
 add(bullet("In simulazione il motore non percorre i rami distruttivi, e l'utenza usata per il dry-run non ha il permesso di cancellare: l'assenza di cancellazioni è una proprietà dei permessi, non una promessa del codice."));
 add(bullet("La policy — l'insieme dei parametri che determinano il perimetro, elencati nel §9.2 — ha un'impronta crittografica. Prima di ogni esecuzione reale il motore verifica che quell'impronta sia stata approvata e registrata sul database. Cambiare uno di quei parametri invalida l'approvazione, e il motore se ne accorge."));
 add(bullet("Le foreign key non vengono mai disabilitate. Se una cancellazione lasciasse un riferimento pendente, il database la rifiuta: è la rete finale, indipendente da ogni logica applicativa."));
+
+add(H3("Dove stanno i controlli di configurazione"));
+add(rich("Il primo livello è raccolto in ", ["PurgeStartupGuard", { mono: 1 }],
+  ", che risponde a una domanda sola: questa configurazione consente una cancellazione reale? Riceve la modalità, le opzioni e gli argomenti della riga di comando, e restituisce il motivo del rifiuto oppure nulla."));
+add(P("Sta prima del gate di approvazione perché i due rifiuti sono diversi e non vanno confusi: «manca un parametro» e «nessuno ha approvato questa regola» mandano chi legge in due direzioni opposte, e un messaggio sbagliato alle due di notte costa un'ora."));
+add(P("È una funzione separata, non un blocco dentro il punto di ingresso, per una ragione appresa a spese proprie. La prima versione del controllo sul fuso viveva nel percorso di avvio e leggeva soltanto lo stato della finestra in configurazione, mentre la rinuncia esplicita alla finestra veniva interpretata più avanti: il risultato era che il comando suggerito come rimedio veniva rifiutato dalla guardia che lo suggeriva. Il difetto era invisibile ai controlli che verificano dove un componente è collegato, e lo è rimasto finché la decisione non è diventata una funzione con i suoi ingressi espliciti, verificabile per comportamento (D-20)."));
+add(note("È la distinzione fra i due tipi di test che il progetto usa: quelli di collegamento dicono che un componente è al suo posto, quelli comportamentali dicono che fa la cosa giusta. Servono entrambi, e il secondo non si può scrivere finché la logica resta annidata in un percorso che si esegue soltanto avviando l'applicazione."));
 
 add(H2("9.2 L'approvazione della policy"));
 add(rich(["L'approvazione è una sola, per policy e per database: non serve approvare ogni esecuzione. ", { b: 1 }],
