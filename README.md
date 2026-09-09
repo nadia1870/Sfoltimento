@@ -29,6 +29,7 @@ db/    000_install_purge.sql   installazione autonoma dello schema Purge
 src/OSM.PaymentOrder.Purge/         motore
 src/OSM.PaymentOrder.Purge.Host/    cronjob ed esecuzione singola
 
+docs/architettura/                  disegno funzionale e tecnico (.docx) e sorgenti
 docs/runbook-primo-dry-run.md       procedura per la prima simulazione in produzione
 docs/runbook-prima-esecuzione-reale.md  procedura per il primo --delete
 docs/decisioni.md                   scelte non ovvie e perche'
