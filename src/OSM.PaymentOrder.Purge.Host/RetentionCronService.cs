@@ -37,11 +37,18 @@ public sealed class RetentionCronService(
         // notte dentro la fase di validazione.
         await schemaVerifier.EnsureAsync(stoppingToken).ConfigureAwait(false);
         var schedule = CronExpression.Parse(_options.CronExpression);
-        var tz = TimeZoneInfo.Local;
+
+        // Lo stesso fuso della finestra, non quello dell'host (D-16).
+        // Erano rimasti disallineati: la finestra rispettava il fuso
+        // dichiarato, la pianificazione no, e su un host in UTC le due cose
+        // divergevano di due ore. Il servizio si sarebbe svegliato alle 03:00
+        // italiane per lavorare in una finestra che chiude alle 05:00, con due
+        // ore di lavoro perse ogni notte e nessun errore da nessuna parte.
+        var tz = _options.TimeZone;
 
         log.LogInformation(
-            "Cronjob di retention avviato. Cron={Cron} Finestra={Start}-{End} DryRun={DryRun}",
-            _options.CronExpression, _options.WindowStart, _options.WindowEnd, _options.DryRun);
+            "Cronjob di retention avviato. Cron={Cron} Fuso={Fuso} Finestra={Start}-{End} DryRun={DryRun}",
+            _options.CronExpression, tz.Id, _options.WindowStart, _options.WindowEnd, _options.DryRun);
 
         while (!stoppingToken.IsCancellationRequested)
         {
