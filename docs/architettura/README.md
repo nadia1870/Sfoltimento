@@ -2,7 +2,7 @@
 
 `Architecture-Functional-Design-Sfoltimento-2026-09-09.docx` è il disegno
 funzionale e tecnico della soluzione, destinato a sviluppo, DBA e Compliance.
-Aggiornato alla baseline `main` post-merge `feature/dapper-dbup`.
+Aggiornato alla baseline `main` con D-17.
 
 Il documento è generato, non modificato a mano: correggere il `.docx` e non i
 sorgenti significa perdere la correzione alla revisione successiva.
