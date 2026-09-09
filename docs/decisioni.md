@@ -741,7 +741,7 @@ Il difetto è sfuggito perché la decisione era coperta solo da un controllo di
 collegamento (D-18), che verifica che la guardia sia invocata e dove, non che
 la condizione sia giusta. La logica è stata estratta in
 `PurgeStartupGuard.RejectionReason(mode, options, args)` — una funzione, quindi
-verificabile per comportamento — e coperta da otto casi che percorrono tutte le
+verificabile per comportamento — e coperta da test che percorrono le
 combinazioni di modalità, finestra, flag e fuso.
 
 **La lezione, che vale oltre questo caso.** Un test di collegamento dice che il
