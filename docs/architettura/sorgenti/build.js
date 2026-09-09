@@ -143,7 +143,7 @@ add(
   new Paragraph({ spacing: { before: 240, after: 0 }, alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: "Motore di retention per SQL Server", size: 24, color: MUTED })] }),
   new Paragraph({ spacing: { before: 60, after: 0 }, alignment: AlignmentType.CENTER,
-    children: [new TextRun({ text: "Baseline: main post-merge feature/dapper-dbup — 09/09/2026", size: 20, color: MUTED, italics: true })] }),
+    children: [new TextRun({ text: "Baseline: main con D-17 — 09/09/2026", size: 20, color: MUTED, italics: true })] }),
   new Paragraph({ spacing: { before: 900, after: 0 }, alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: "Documento interno — Sviluppo, DBA, Compliance", size: 19, color: MUTED })] }),
   pageBreak()
@@ -351,6 +351,9 @@ add(table(
   ],
   [900, 5900, 2600]
 ));
+add(H3("Il censimento degli stati non riconosciuti"));
+add(P("Le validazioni fermano il run. Accanto a loro il report della simulazione porta un censimento che non ferma nulla: gli stati presenti sugli ordini che non figurano fra i cinque riconosciuti come terminali, con quanti ordini oltre soglia li portano e da quando."));
+add(P("Non è un controllo, ed è deliberato: se uno stato nuovo sia conclusivo lo sa il dominio, non il purge, e bloccare l'esecuzione perché ne è comparso uno sarebbe sbagliato quanto ignorarlo. Ma senza quella riga la domanda non verrebbe posta da nessuno, e quegli ordini resterebbero a database per sempre mentre il purge continua a girare verde. È l'unico modo in cui lo schema applicativo può derivare in silenzio: una tabella nuova fa fallire una cancellazione, una colonna rimossa fa fallire una query, uno stato nuovo non produce niente (D-15)."));
 add(note("Le validazioni sono deliberatamente intransigenti: dopo le esclusioni del paragrafo 4.4, un riscontro qui non è un dato strano ma un difetto del programma, e deve fermare tutto. Il censimento delle anomalie note avviene prima, in selezione; la validazione è la rete di sicurezza, e una rete che scarta in silenzio non è più una rete."));
 add(pageBreak());
 
@@ -395,7 +398,12 @@ add(P("Due limiti, entrambi rispettati: un tetto di righe per slice (3000 per de
 add(H2("6.2 Le regole di composizione"));
 add(bullet("Ordini singoli: si accumulano fino al raggiungimento di uno dei due limiti."));
 add(bullet("Collettivi: tutti i componenti dello stesso collettivo finiscono nella stessa slice. Non è negoziabile, ed è ciò che rende la cancellazione atomica."));
-add(bullet("Aggregati sovradimensionati: un aggregato il cui peso individuale supera il tetto — tipicamente un collettivo grande, o un ordine con centinaia di revisioni — diventa una slice a sé. Si accetta consapevolmente un picco di lock, perché l'alternativa sarebbe spezzare l'aggregato."));
+add(bullet("Aggregati sovradimensionati: un aggregato il cui peso individuale supera il tetto della slice — tipicamente un collettivo grande, o un ordine con centinaia di revisioni — diventa una slice a sé. Si accetta consapevolmente un picco di lock, perché l'alternativa sarebbe spezzare l'aggregato."));
+add(bullet("Aggregati oltre il secondo tetto: sopra un limite molto più alto l'aggregato non entra in alcuna slice. Viene escluso, censito con il motivo e resta a database."));
+
+add(H3("Perché i tetti sono due"));
+add(P("«Si accetta un picco di lock» è vero fino a un certo peso e falso oltre. Un collettivo da duecento componenti con molte revisioni può valere centomila righe: cancellarlo in una sola transazione innesca la lock escalation e gonfia il log, cioè esattamente ciò che questo capitolo esiste per evitare. Il primo tetto dimensiona la slice; il secondo dice fino a dove il picco è accettabile."));
+add(P("Sopra il secondo tetto l'aggregato viene messo da parte con un motivo, compare nel report e resta a database finché qualcuno decide come trattarlo (D-17). Spezzarlo sarebbe l'alternativa: per un collettivo è escluso dall'atomicità, per un ordine singolo richiederebbe un meccanismo nuovo con una propria atomicità da dimostrare, per un caso che dovrebbe essere raro. Escludere e censire costa niente e rende il caso misurabile; se il censimento mostrasse che è frequente, allora varrebbe la pena costruire lo spezzamento."));
 
 add(H2("6.3 Il packer è una funzione pura"));
 add(P("La composizione delle slice non accede al database, non apre connessioni e non decide l'eleggibilità: riceve una sequenza di candidati con il loro peso e restituisce assegnazioni. Questo la rende verificabile in modo esaustivo con test in memoria, senza database — ed è il motivo per cui i casi limite (aggregato sovradimensionato, collettivo a cavallo di due slice, ordine senza peso) sono coperti da test rapidi e deterministici."));
@@ -447,6 +455,13 @@ add(rich("Ogni slice figlia conserva il riferimento alla slice madre. La domanda
 add(H2("7.5 La finestra operativa"));
 add(P("Il purge gira in una finestra notturna configurabile (per default dall'una alle cinque). La finestra è rispettata a due livelli: fra una slice e l'altra si verifica se c'è ancora tempo, e le fasi lunghe come la selezione ricevono un segnale di chiusura con una tolleranza. Un run che supera la finestra non è un errore: esce con un codice dedicato, così lo scheduler lo registra, e riprende la notte dopo."));
 add(note("Sui volumi di produzione le prime notti finiranno quasi sempre così. È il comportamento previsto, non un guasto — vale la pena dirlo in anticipo a chi sorveglia i job."));
+
+add(H3("Il fuso della finestra è dichiarato, non ereditato"));
+add(rich("«Dall'una alle cinque» non significa nulla senza un fuso. L'orario si legge in quello indicato in configurazione (",
+  ["TimeZoneId", { mono: 1 }],
+  "), non in quello dell'host: in un container il fuso locale è quasi sempre UTC, e la finestra diventerebbe 02:00–06:00 italiane d'inverno e 03:00–07:00 d'estate — tutte le notti, senza errori e senza avvisi. Il fuso in uso viene scritto nel log all'avvio, così una configurazione sbagliata si vede alla prima riga invece che dai grafici di carico."));
+add(P("La scadenza si calcola inoltre costruendo l'istante di chiusura, non sottraendo due orari. Sembra un dettaglio e non lo è: il timer che ne deriva misura tempo reale, mentre la differenza fra due orari misura orologio, e nelle due notti di cambio ora le due cose divergono di sessanta minuti. Nella notte di primavera la scadenza risultava un'ora più generosa, e una fase lunga poteva proseguire fino alle sei del mattino (D-16)."));
+add(note("I due casi patologici sono gestiti esplicitamente. Se l'orario di chiusura non esiste in quella data — il salto di primavera — si prende il primo istante valido successivo. Se esiste due volte — il ritorno all'ora solare — si prende il primo: chiudere in anticipo costa un'ora di lavoro non fatto, chiudere in ritardo porta il purge nell'orario lavorativo."));
 add(pageBreak());
 
 // ================================================================ 8
@@ -726,6 +741,9 @@ add(table(
     ["D-12", "Il cambio di stato in corsa non si riprova", "Retry: il conteggio riflette uno stato già committato, riprovare conferma lo stesso esito."],
     ["D-13", "Migrazioni tracciate con script SQL", "Migrazioni EF Core: viste, indici filtrati e ALTER diventerebbero SQL dentro C#, non più rivedibile dal DBA."],
     ["D-14", "Mappatura per nome di colonna", "Lettura per posizione: una colonna aggiunta in mezzo è un errore silenzioso."],
+    ["D-15", "Deriva dello schema rilevata all'avvio", "Solo la verifica manuale: una tabella nuova legata a Order si sarebbe manifestata di notte, come aggregati abbandonati uno per uno."],
+    ["D-16", "Finestra in un fuso dichiarato, scadenza come istante", "Fuso dell'host e differenza fra orari: in un container il fuso è UTC, e nella notte di primavera la scadenza concedeva un'ora in più."],
+    ["D-17", "Tetto al peso del singolo aggregato", "Nessun limite superiore: un collettivo da centomila righe diventa la transazione che il packing esiste per evitare."],
     ["B-1", "Packer separato e privo di I/O", "Packing dentro il planner: non verificabile senza database."],
     ["B-2", "Reader chiuso prima della bulk copy", "Reader aperto: conflitto sulla stessa sessione SQL."],
     ["HK-1", "Housekeeping distinto dal purge di dominio", "Un'unica procedura: audit e staging hanno esigenze di conservazione opposte."]
@@ -738,20 +756,36 @@ add(pageBreak());
 // ================================================================ 12
 add(H1("12. Punti aperti"));
 add(P("Ciò che segue non è incompleto per dimenticanza: sono decisioni che spettano a interlocutori esterni allo sviluppo, e che il sistema oggi gestisce nel modo più prudente possibile in attesa di una risposta."));
+add(P("La classificazione conta quanto la domanda. Un punto che impedisce il primo sfoltimento e uno che si può chiarire dopo richiedono la stessa risposta, ma non nello stesso momento, e confonderli fa perdere tempo su entrambi."));
 add(spacer());
 add(table(
-  ["ID", "Questione", "Interlocutore", "Comportamento attuale"],
+  ["Classe", "Significato"],
   [
-    ["PA-3", "I cinque anni decorrono dalla data dell'operazione o dalla chiusura d'esercizio?", "Compliance / Legal", "Ancoraggio all'esercizio: l'ipotesi più conservativa"],
-    ["PA-4", "Cinque anni sono sufficienti per tutte le categorie di ordine?", "Compliance / Legal", "Soglia unica per tutte le categorie"],
-    ["PA-5", "Serve un meccanismo di blocco per contenzioso (legal hold)?", "Legal", "Non implementato: nessun ordine è esentabile"],
-    ["PA-7", "Collettivi privi di data di esecuzione", "Business", "Esclusi e censiti: mai cancellati"],
-    ["PA-21", "Da quanto tempo un ordine mai completato può essere rimosso?", "Business / Compliance", "Strategia disattivata"],
-    ["—", "Un piano ricorrente può essere componente di un collettivo?", "Business", "Non escluso esplicitamente: da chiarire prima dei volumi grandi"],
-    ["—", "Retention per l'audit trail", "Compliance", "Nessuna: audit e tracce conservati senza limite"]
+    ["Bloccante", "Il primo sfoltimento reale non può avvenire senza risposta: senza, il perimetro di ciò che verrebbe cancellato non è definito."],
+    ["Prima di attivare", "Non impedisce il go-live, ma blocca l'attivazione di una funzione specifica."],
+    ["Chiarimento operativo", "Il comportamento attuale è difendibile; la risposta lo conferma o lo cambia, senza urgenza."],
+    ["Capacità futura", "Funzione oggi assente. Va deciso se e quando servirà, non come farla."]
   ],
-  [700, 3700, 1900, 3100]
+  [2000, 7400]
 ));
+add(spacer());
+add(table(
+  ["ID", "Classe", "Questione", "Interlocutore", "Comportamento attuale"],
+  [
+    ["PA-3", "Bloccante", "I cinque anni decorrono dalla data dell'operazione o dalla chiusura d'esercizio?", "Compliance / Legal", "Ancoraggio all'esercizio: l'ipotesi più conservativa"],
+    ["PA-4", "Bloccante", "Cinque anni sono sufficienti per tutte le categorie di ordine?", "Compliance / Legal", "Soglia unica per tutte le categorie"],
+    ["PA-21", "Prima di attivare", "Da quanto tempo un ordine mai completato può essere rimosso?", "Business / Compliance", "Strategia degli abbandoni disattivata"],
+    ["PA-7", "Chiarimento operativo", "Collettivi privi di data di esecuzione", "Business", "Esclusi e censiti: mai cancellati"],
+    ["—", "Chiarimento operativo", "Un piano ricorrente può essere componente di un collettivo?", "Business", "Non escluso esplicitamente: da chiarire prima dei volumi grandi"],
+    ["—", "Chiarimento operativo", "Esistono stati conclusivi oltre i cinque riconosciuti?", "Business", "Censiti a ogni simulazione (§4.7): non vengono mai sfoltiti finché non sono dichiarati"],
+    ["—", "Chiarimento operativo", "Quale valore per il tetto per aggregato?", "DBA", "Default prudenziale: va tarato sui pesi reali dopo la prima simulazione"],
+    ["PA-5", "Capacità futura", "Serve un blocco per contenzioso (legal hold)?", "Legal", "Non implementato: nessun ordine è esentabile"],
+    ["—", "Capacità futura", "Retention per l'audit trail", "Compliance", "Nessuna: audit e tracce conservati senza limite"]
+  ],
+  [700, 1700, 3100, 1500, 2400]
+));
+add(note("Solo PA-3 e PA-4 impediscono il primo sfoltimento reale. Gli altri hanno un comportamento attuale prudente e documentato, e una risposta diversa si traduce in configurazione, non in riprogettazione."));
+add(P("Un secondo insieme di punti aperti riguarda la cancellazione su richiesta — per numero di relazione del debitore e per identificativo di pagamento — che è una funzione distinta dalla retention e non è oggetto di questo documento. Il disegno proposto e i suoi ventuno punti aperti, cinque dei quali bloccanti, sono in docs/disegno-cancellazione-su-richiesta.md."));
 add(pageBreak());
 
 // ================================================================ 13
@@ -769,7 +803,9 @@ add(check("Policy approvata e registrata (purge approve)."));
 add(check("Backup completo verificato con ripristino di prova."));
 add(check("Spazio del log transazionale verificato per il volume previsto."));
 add(check("Permesso di cancellazione concesso alla sola utenza del purge, dopo l'approvazione."));
-add(check("Dimensione delle slice e finestra oraria tarate sui numeri reali."));
+add(check("Dimensione delle slice, tetto per aggregato e finestra oraria tarati sui numeri reali."));
+add(check("Fuso orario della finestra dichiarato in configurazione e verificato nella prima riga di log."));
+add(check("Verifica delle foreign key ripetuta dopo ogni rilascio dell'applicazione: una tabella nuova legata all'aggregato impedisce l'avvio (D-15)."));
 add(check("Ripresa dopo interruzione verificata su ambiente di test."));
 add(check("Allarmi configurati su slice abbandonate, slice divise e durata."));
 add(check("Retention dello staging tarata."));
@@ -793,6 +829,7 @@ add(table(
     ["db/020_analisi_pre_dry_run.sql", "Fotografia del database prima della simulazione"],
     ["db/021_analisi_post_dry_run.sql", "Lettura dei risultati di un run"],
     ["docs/decisioni.md", "Registro esteso delle decisioni architetturali"],
+    ["docs/disegno-cancellazione-su-richiesta.md", "Proposta: cancellazione per relazione debitore e per identificativo di pagamento"],
     ["docs/runbook-primo-dry-run.md", "Procedura della prima simulazione"],
     ["docs/runbook-prima-esecuzione-reale.md", "Procedura della prima cancellazione"],
     ["docs/changelog/", "Storia delle versioni"]
@@ -813,6 +850,8 @@ add(table(
     ["MaxOrdersPerBatch  ▲", "500", "Tetto di aggregati per slice."],
     ["SelectionBatchSize", "4000", "Righe lette per pagina in selezione ed espansione."],
     ["MaxSliceAttempts", "3", "Tentativi su una slice in caso di contesa."],
+    ["MaxAggregateWeight  ▲", "30 000", "Peso oltre il quale l'aggregato è escluso invece di essere cancellato. Zero disattiva il limite."],
+    ["TimeZoneId  ▲", "(fuso dell'host)", "Fuso in cui si leggono WindowStart e WindowEnd. Da valorizzare in produzione."],
     ["MaxSplitDepth", "10", "Bisezioni massime prima di abbandonare. Zero disattiva la bisezione."],
     ["MaxRunInterruptions", "5", "Interruzioni tollerate prima di dichiarare il run fallito."],
     ["InterSliceDelay  ▲", "100 ms", "Pausa fra una slice e l'altra: è la leva principale sull'impatto all'operatività."],
