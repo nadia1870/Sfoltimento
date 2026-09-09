@@ -143,7 +143,7 @@ add(
   new Paragraph({ spacing: { before: 240, after: 0 }, alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: "Motore di retention per SQL Server", size: 24, color: MUTED })] }),
   new Paragraph({ spacing: { before: 60, after: 0 }, alignment: AlignmentType.CENTER,
-    children: [new TextRun({ text: "Baseline: main con D-17 — 09/09/2026", size: 20, color: MUTED, italics: true })] }),
+    children: [new TextRun({ text: "Baseline: main con D-20 — 09/09/2026", size: 20, color: MUTED, italics: true })] }),
   new Paragraph({ spacing: { before: 900, after: 0 }, alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: "Documento interno — Sviluppo, DBA, Compliance", size: 19, color: MUTED })] }),
   pageBreak()
@@ -230,7 +230,7 @@ add(table(
     ["Peso (RowWeight)", "Righe stimate per un aggregato: 1 + 2 × numero di revisioni. È la misura su cui si dimensionano le slice, non il numero di ordini."],
     ["Filigrana (anchor)", "La coppia (data, id) dell'ultima riga letta, usata per riprendere la lettura paginata senza rileggere né saltare righe."],
     ["Staging", "Le tabelle di lavoro dello schema Purge che contengono i candidati del run: RunCandidateOrder, RunCandidateOrderHistory, RunCandidateCollective."],
-    ["Policy", "La combinazione di parametri che determina cosa viene cancellato: anni di retention, modo di ancoraggio, strategie attive. Ha un'impronta crittografica ed è ciò che viene approvato."]
+    ["Policy", "La combinazione di parametri che determina il perimetro degli aggregati cancellabili. Ha un'impronta crittografica ed è ciò che viene approvato. Comprende gli anni di retention, il modo di ancoraggio, le strategie attive, i parametri della strategia degli abbandoni e il tetto per aggregato: l'elenco esatto è nel §9.2."]
   ],
   [2200, 7200]
 ));
@@ -463,6 +463,7 @@ add(rich("«Dall'una alle cinque» non significa nulla senza un fuso. L'orario s
   ["TimeZoneId", { mono: 1 }],
   "), non in quello dell'host: in un container il fuso locale è quasi sempre UTC, e la finestra diventerebbe 02:00–06:00 italiane d'inverno e 03:00–07:00 d'estate — tutte le notti, senza errori e senza avvisi. Il fuso in uso viene scritto nel log all'avvio, così una configurazione sbagliata si vede alla prima riga invece che dai grafici di carico."));
 add(P("La scadenza si calcola inoltre costruendo l'istante di chiusura, non sottraendo due orari. Sembra un dettaglio e non lo è: il timer che ne deriva misura tempo reale, mentre la differenza fra due orari misura orologio, e nelle due notti di cambio ora le due cose divergono di sessanta minuti. Nella notte di primavera la scadenza risultava un'ora più generosa, e una fase lunga poteva proseguire fino alle sei del mattino (D-16)."));
+add(P("Il fuso non è facoltativo quando si cancella davvero: un'esecuzione reale con la finestra attiva e nessun fuso dichiarato viene rifiutata all'avvio. Senza quel valore la finestra è definita dal fuso della macchina, che non è una decisione presa da nessuno — e affidarsi alla disciplina operativa per un parametro che decide quando si cancella in produzione è una garanzia più debole di un controllo (D-20). La simulazione resta permissiva: serve a produrre il report, e non tocca nulla."));
 add(note("I due casi patologici sono gestiti esplicitamente. Se l'orario di chiusura non esiste in quella data — il salto di primavera — si prende il primo istante valido successivo. Se esiste due volte — il ritorno all'ora solare — si prende il primo: chiudere in anticipo costa un'ora di lavoro non fatto, chiudere in ritardo porta il purge nell'orario lavorativo."));
 add(pageBreak());
 
@@ -499,7 +500,7 @@ add(P("Ciascun livello ferma la cancellazione da solo, e sono indipendenti fra l
 add(bullet("All'avvio, il motore verifica che lo schema di controllo sia quello atteso. Se manca una colonna, il processo non parte."));
 add(bullet("La modalità — simulazione o cancellazione — si indica obbligatoriamente da riga di comando. Non è configurabile: nessun file di configurazione modificato per errore può trasformare una simulazione in una cancellazione."));
 add(bullet("In simulazione il motore non percorre i rami distruttivi, e l'utenza usata per il dry-run non ha il permesso di cancellare: l'assenza di cancellazioni è una proprietà dei permessi, non una promessa del codice."));
-add(bullet("La policy — anni di retention, ancoraggio, strategie attive — ha un'impronta crittografica. Prima di ogni esecuzione reale il motore verifica che quell'impronta sia stata approvata e registrata sul database. Cambiare un parametro invalida l'approvazione, e il motore se ne accorge."));
+add(bullet("La policy — l'insieme dei parametri che determinano il perimetro, elencati nel §9.2 — ha un'impronta crittografica. Prima di ogni esecuzione reale il motore verifica che quell'impronta sia stata approvata e registrata sul database. Cambiare uno di quei parametri invalida l'approvazione, e il motore se ne accorge."));
 add(bullet("Le foreign key non vengono mai disabilitate. Se una cancellazione lasciasse un riferimento pendente, il database la rifiuta: è la rete finale, indipendente da ogni logica applicativa."));
 
 add(H2("9.2 L'approvazione della policy"));
@@ -548,7 +549,8 @@ add(H3("Che cosa viene registrato"));
 add(P("Una riga in Purge.PolicyApproval, con chiave l'impronta della policy: impronta, identificativo del dry-run di riferimento, data e ora, nome di chi approva, descrizione leggibile della policy e la nota. La descrizione è in chiaro proprio perché chi legge l'audit non deve interpretare un'impronta esadecimale:"));
 add(code([
   "Retention=5 anni, Ancoraggio=FiscalYearEnd, Abbandonati=disattivi,",
-  "Strategie=[Terminated, StandingOrders, Collective, OrphanHistory]"
+  "Strategie=[Terminated, StandingOrders, Collective, OrphanHistory],",
+  "TettoAggregato=30.000 righe"
 ]));
 
 add(H3("Come viene verificata, a ogni esecuzione"));
@@ -750,6 +752,9 @@ add(table(
     ["D-15", "Deriva dello schema rilevata all'avvio", "Solo la verifica manuale: una tabella nuova legata a Order si sarebbe manifestata di notte, come aggregati abbandonati uno per uno."],
     ["D-16", "Finestra in un fuso dichiarato, scadenza come istante", "Fuso dell'host e differenza fra orari: in un container il fuso è UTC, e nella notte di primavera la scadenza concedeva un'ora in più."],
     ["D-17", "Tetto al peso del singolo aggregato", "Nessun limite superiore: un collettivo da centomila righe diventa la transazione che il packing esiste per evitare."],
+    ["D-18", "Ogni decisione collegata al runtime ha un test che lo dice", "Fidarsi del codice: un componente di sicurezza scollegato è indistinguibile da uno assente, e scollegarlo è un'operazione di una riga."],
+    ["D-19", "Il tetto per aggregato fa parte della policy approvata", "Trattarlo come una manopola di prestazione: cambia quali aggregati vengono cancellati, quindi cambia il perimetro."],
+    ["D-20", "Il fuso è obbligatorio per le esecuzioni reali", "Lasciarlo alla disciplina operativa: senza, la finestra è definita dal fuso della macchina, che non è una decisione di nessuno."],
     ["B-1", "Packer separato e privo di I/O", "Packing dentro il planner: non verificabile senza database. Il packer ha stato — serve a tenere insieme un collettivo — ma non tocca il database."],
     ["B-2", "Reader chiuso prima della bulk copy", "Reader aperto: conflitto sulla stessa sessione SQL."],
     ["HK-1", "Housekeeping distinto dal purge di dominio", "Un'unica procedura: audit e staging hanno esigenze di conservazione opposte."]
@@ -810,7 +815,7 @@ add(check("Backup completo verificato con ripristino di prova."));
 add(check("Spazio del log transazionale verificato per il volume previsto."));
 add(check("Permesso di cancellazione concesso alla sola utenza del purge, dopo l'approvazione."));
 add(check("Dimensione delle slice, tetto per aggregato e finestra oraria tarati sui numeri reali."));
-add(check("Fuso orario della finestra dichiarato in configurazione e verificato nella prima riga di log."));
+add(check("Fuso orario dichiarato in Purge:TimeZoneId e verificato nella prima riga di log. Senza, l'esecuzione reale viene rifiutata all'avvio."));
 add(check("Verifica delle foreign key ripetuta dopo ogni rilascio dell'applicazione: una tabella nuova legata all'aggregato impedisce l'avvio (D-15)."));
 add(check("Ripresa dopo interruzione verificata su ambiente di test."));
 add(check("Allarmi configurati su slice abbandonate, slice divise e durata."));
@@ -855,7 +860,7 @@ add(table(
     ["AbandonedEnabled", "false", "Strategia degli ordini mai completati (PA-21). Nella policy approvata."],
     ["AbandonedRetentionMonths", "24", "Soglia degli abbandoni. Nella policy approvata."],
     ["MaxAggregateWeight", "30 000", "Peso oltre il quale l'aggregato è escluso invece di essere cancellato. Zero disattiva il limite. Nella policy approvata: cambia il perimetro. Da tarare sui pesi reali."],
-    ["TimeZoneId", "(fuso dell'host)", "Fuso in cui si leggono la finestra e la pianificazione interna. Da valorizzare in produzione: il default eredita il fuso della macchina, che in un container è quasi sempre UTC."],
+    ["TimeZoneId", "(fuso dell'host)", "Fuso in cui si leggono la finestra e la pianificazione interna. Obbligatorio per le esecuzioni reali con la finestra attiva: senza, il motore non parte. Il default eredita il fuso della macchina, che in un container è quasi sempre UTC."],
     ["WindowStart / WindowEnd", "01:00 / 05:00", "Finestra operativa, nel fuso dichiarato. Da tarare."],
     ["WindowGrace", "5 minuti", "Tolleranza oltre la chiusura concessa a una fase lunga per terminare in modo ordinato invece di essere troncata."],
     ["CronExpression", "0 1 * * *", "Pianificazione interna della modalità servizio, interpretata nel fuso dichiarato."],

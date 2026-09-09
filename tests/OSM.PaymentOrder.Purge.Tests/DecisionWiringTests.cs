@@ -141,6 +141,30 @@ public sealed class DecisionWiringTests
     }
 
     /// <summary>
+    /// D-20: un'esecuzione reale con la finestra attiva pretende un fuso
+    /// dichiarato. Senza, la finestra sarebbe definita dal fuso della
+    /// macchina, che non e' una decisione di nessuno.
+    ///
+    /// Il controllo sta prima del gate: rifiutare per configurazione mancante
+    /// e' piu' preciso che rifiutare per policy non approvata, e i due motivi
+    /// non vanno confusi nel messaggio.
+    /// </summary>
+    [Fact]
+    public void L_esecuzione_reale_pretende_un_fuso_dichiarato()
+    {
+        var program = Sorgente("Program.cs");
+
+        Assert.Contains("mode == PurgeExecutionMode.Delete", program);
+        Assert.Contains("string.IsNullOrWhiteSpace(opzioni.TimeZoneId)", program);
+
+        var posizioneControllo = program.IndexOf("string.IsNullOrWhiteSpace(opzioni.TimeZoneId)",
+            StringComparison.Ordinal);
+        var posizioneGate = program.IndexOf("gate.IsAllowedAsync(", StringComparison.Ordinal);
+        Assert.True(posizioneControllo < posizioneGate,
+            "Il controllo sul fuso deve precedere il gate: sono due rifiuti diversi.");
+    }
+
+    /// <summary>
     /// D-14: le interfacce del livello dati non devono esporre Dapper. È ciò
     /// che rende sostituibile il livello dati senza toccare il motore.
     /// </summary>
