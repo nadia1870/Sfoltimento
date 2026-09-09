@@ -207,7 +207,14 @@ public sealed class PurgeOptions
     /// una configurazione dichiarata.
     /// </summary>
     public DateTimeOffset Now(TimeProvider clock) =>
-        TimeZoneInfo.ConvertTime(clock.GetUtcNow(), TimeZone);
+        HasDeclaredZone
+            ? TimeZoneInfo.ConvertTime(clock.GetUtcNow(), TimeZone)
+            // Senza un fuso dichiarato si delega al TimeProvider, che conosce
+            // il proprio: TimeZoneInfo.Local ignorerebbe il fuso di un
+            // orologio finto, rendendo i test dipendenti dalla macchina.
+            : clock.GetLocalNow();
+
+    private bool HasDeclaredZone => !string.IsNullOrWhiteSpace(TimeZoneId);
 
     public bool WindowEnabled { get; set; } = true;
     public TimeOnly WindowStart { get; set; } = new(1, 0);
@@ -316,7 +323,7 @@ public sealed class PurgeOptions
         // chiusura cade domani.
         var giornoChiusura = adesso < WindowEnd ? oggi : oggi.AddDays(1);
 
-        var chiusura = ToInstant(giornoChiusura.ToDateTime(WindowEnd));
+        var chiusura = ToInstant(giornoChiusura.ToDateTime(WindowEnd), now);
         var residuo = chiusura - now;
 
         return residuo > TimeSpan.Zero ? residuo : TimeSpan.Zero;
@@ -326,8 +333,20 @@ public sealed class PurgeOptions
     /// Istante corrispondente a un orario locale nel fuso della finestra,
     /// gestendo i due casi patologici del cambio ora.
     /// </summary>
-    private DateTimeOffset ToInstant(DateTime local)
+    private DateTimeOffset ToInstant(DateTime local, DateTimeOffset riferimento)
     {
+        // Senza un fuso dichiarato non si puo' sapere se e quando l'ora
+        // cambia, quindi si conserva l'offset dell'istante ricevuto: il conto
+        // torna a essere una differenza di orologio, come prima di D-16.
+        //
+        // Non e' un ripiego pigro. L'alternativa — usare TimeZoneInfo.Local —
+        // legherebbe il risultato al fuso della macchina su cui gira il
+        // processo, che e' esattamente il difetto che D-16 corregge: lo
+        // sposterebbe dalla finestra al calcolo della scadenza. Meglio un
+        // comportamento dichiaratamente piu' povero ma prevedibile, e un
+        // TimeZoneId valorizzato in produzione.
+        if (!HasDeclaredZone) return new DateTimeOffset(local, riferimento.Offset);
+
         // Ora inesistente (salto di primavera): l'orario configurato non
         // esiste in questa data. Si prende il primo istante valido dopo.
         for (var i = 0; i < 8 && TimeZone.IsInvalidTime(local); i++)
