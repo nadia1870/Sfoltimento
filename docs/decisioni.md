@@ -558,3 +558,66 @@ valore.
   esegue ciò che gli si dà, e la politica del purge resta dove era.
 - `ScalarAsync<T>` delega a `ExecuteScalarAsync<T>`, che conserva il
   comportamento precedente: NULL dal server diventa `default(T)`.
+
+
+---
+
+## D-15 — La deriva dello schema si rileva all'avvio, non di notte
+
+**Contesto.** `RetentionSql` nomina esplicitamente una dozzina di colonne
+applicative e nessuna tabella con `SELECT *`, quindi una colonna aggiunta a
+`Order` o a una sua figlia non ha alcun effetto sul purge. Quattro
+cambiamenti però contano, e due passavano senza difese automatiche:
+
+1. **una tabella nuova che referenzia `Order` o `OrderHistory`** — non è in
+   `PurgeTopology`, nessuna `DELETE` la tocca, la FK fa fallire la
+   cancellazione della testata con errore 547. Dopo D-11 il sintomo è una
+   sequenza di aggregati abbandonati, uno per uno, ogni notte;
+2. **uno stato terminale nuovo** — `TerminalStates` è una costante: quegli
+   ordini non diventano mai eleggibili, e *non succede niente*. È l'unica
+   deriva silenziosa;
+3. un tipo di pagamento nuovo — variante del caso 1;
+4. una colonna rinominata o rimossa fra quelle usate — errore 207 immediato,
+   visibile alla prima esecuzione anche in dry-run.
+
+Il caso 1 era coperto da `004_verify_fk.sql`, che però è manuale e porta due
+liste di nomi copiate a mano, quindi soggette a divergere dalla topologia.
+Il caso 2 non era coperto da nulla.
+
+**Decisione.**
+
+- `SchemaVerifier` confronta le foreign key reali di `Order` e `OrderHistory`
+  con i figli attesi, derivati da `PurgeTopology`. Una tabella inattesa
+  impedisce l'avvio, con il suo nome nel messaggio.
+- Il report del dry-run censisce gli stati non riconosciuti come terminali,
+  con quanti ordini oltre soglia li portano e da quando.
+
+**Perché un censimento e non un controllo, per gli stati.** Se uno stato
+nuovo sia conclusivo lo sa il dominio, non il purge: bloccare l'esecuzione
+perché è comparso `Settled` sarebbe sbagliato quanto ignorarlo. Il report lo
+mostra a chi lo legge — che è la stessa persona che può rispondere. Il
+conteggio è limitato agli ordini oltre soglia perché è quello che rende la
+domanda urgente: due milioni di righe vecchie di sei anni sono un problema,
+dieci righe di ieri no. Gli stati degli abbandoni (`Created`,
+`PartiallyAuthorised`) sono esclusi: sono la popolazione di una strategia
+esistente e segnalarli a ogni run sarebbe rumore, ed è il rumore che rende
+inutili i censimenti.
+
+**Perché solo i due genitori dell'aggregato.** Una tabella nuova che
+referenzia un dettaglio — poniamo `BankTransfer` — non viene rilevata. È un
+limite dichiarato e verificato da un test: sarebbe un grafo diverso da quello
+che la topologia descrive, e va affrontato lì, non allargando un controllo
+che a quel punto segnalerebbe anche ciò che non c'entra.
+
+**Conseguenze.**
+
+- Le liste in `004_verify_fk.sql` restano per chi esegue le verifiche senza
+  avviare il motore, ma non sono più l'unica difesa: se divergono dalla
+  topologia, è quella copia a essere vecchia. Lo script lo dice.
+- `PurgeTopology.ExpectedChildren()` deriva dai gruppi di cancellazione:
+  una tabella aggiunta alla topologia compare da sola nel controllo, e non
+  esiste una seconda lista da ricordarsi di aggiornare.
+- Un ambiente in cui l'applicazione ha già aggiunto una tabella legata a
+  `Order` non parte più finché la topologia non viene aggiornata. È voluto:
+  prima partiva e cancellava tutto il resto lasciando quegli aggregati a
+  database senza che nessuno decidesse.
