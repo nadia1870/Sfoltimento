@@ -701,6 +701,37 @@ costruire lo spezzamento.
 
 ---
 
+## D-20 — Il fuso è obbligatorio per le esecuzioni reali
+
+**Contesto.** D-16 ha introdotto `TimeZoneId` e la documentazione lo dichiara
+«da valorizzare in produzione», ma il codice non lo pretendeva: senza, si
+ripiega sul fuso della macchina. Una revisione esterna ha osservato che così
+la garanzia si affida alla disciplina operativa, ed è più debole di un
+controllo.
+
+Ha ragione, e il rischio non è teorico: su un host in UTC — la norma in un
+container — «01:00–05:00» diventa 02:00–06:00 italiane d'inverno, e il purge
+lavora un'ora dentro l'operatività tutte le notti, senza errori.
+
+**Decisione.** Un'esecuzione in modalità `--delete` con la finestra attiva e
+nessun fuso dichiarato viene rifiutata all'avvio, con codice 2 e un messaggio
+che nomina il fuso della macchina che sarebbe stato usato.
+
+**Perché solo per la cancellazione reale.** La simulazione resta permissiva:
+serve a produrre il report da approvare, non tocca nulla, e pretendere il fuso
+lì bloccherebbe il percorso che porta all'approvazione. Un dry-run nell'ora
+sbagliata produce lo stesso report.
+
+**Perché prima del gate.** Rifiutare per configurazione mancante è un motivo
+diverso dal rifiutare per policy non approvata, e confonderli nel messaggio
+manderebbe chi legge a cercare un'approvazione che non serve.
+
+**Conseguenza.** `--no-window` resta la via d'uscita per chi ha davvero
+bisogno di eseguire senza limite orario: è già esplicita e registrata nel log,
+e chi la usa sta dichiarando di sapere cosa fa.
+
+---
+
 ## D-19 — Il tetto per aggregato fa parte della policy approvata
 
 **Contesto.** D-16 e D-17 avevano classificato `MaxAggregateWeight` fra i

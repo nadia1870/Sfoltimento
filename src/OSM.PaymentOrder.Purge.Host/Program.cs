@@ -106,6 +106,29 @@ public static class Program
         var opzioni = host.Services.GetRequiredService<IOptions<PurgeOptions>>().Value;
         opzioni.DryRun = mode == PurgeExecutionMode.DryRun;
 
+        // Il fuso della finestra non e' facoltativo quando si cancella davvero
+        // (D-20). Senza, la finestra e la pianificazione sono definite dal fuso
+        // della macchina — in un container quasi sempre UTC — e nessuno ha
+        // deciso che sia quello. Il rischio non e' teorico: su un host in UTC
+        // "01:00-05:00" diventa 02:00-06:00 italiane d'inverno, e il purge
+        // lavora un'ora dentro l'operativita' tutte le notti.
+        //
+        // La simulazione resta permissiva: serve a produrre il report da
+        // approvare, non tocca nulla, e pretendere il fuso li' bloccherebbe il
+        // percorso che porta all'approvazione.
+        if (mode == PurgeExecutionMode.Delete
+            && opzioni.WindowEnabled
+            && string.IsNullOrWhiteSpace(opzioni.TimeZoneId))
+        {
+            Console.Error.WriteLine(
+                "Esecuzione in modalita' DELETE rifiutata: Purge:TimeZoneId non e' " +
+                $"configurato, e la finestra {opzioni.WindowStart}-{opzioni.WindowEnd} " +
+                $"verrebbe letta nel fuso della macchina ({TimeZoneInfo.Local.Id}). " +
+                "Dichiarare il fuso, oppure disattivare la finestra con " +
+                $"{NoWindowFlag} se e' una scelta consapevole.");
+            return 2;
+        }
+
         var gate = host.Services.GetRequiredService<PurgeApprovalGate>();
         if (!await gate.IsAllowedAsync(mode, CancellationToken.None).ConfigureAwait(false))
         {
