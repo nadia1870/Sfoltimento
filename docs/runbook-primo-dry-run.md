@@ -315,7 +315,7 @@ GRANT DELETE ON SCHEMA::PaymentOrder TO [<UTENZA_PURGE>];
 ```
 
 e la pianificazione di `purge once --delete` come job separato. La prima
-esecuzione reale merita un runbook suo.
+esecuzione reale ha un runbook suo: `runbook-prima-esecuzione-reale.md`.
 
 Se il report **non** è accettabile, non c'è niente da annullare: lo staging
 dei run conclusi viene rimosso dall'housekeeping dopo `StagingRetentionDays`
