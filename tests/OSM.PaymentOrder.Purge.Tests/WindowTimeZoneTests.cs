@@ -145,6 +145,35 @@ public sealed class WindowTimeZoneTests
         Assert.Equal(TimeZoneInfo.Local, new PurgeOptions().TimeZone);
     }
 
+    /// <summary>
+    /// Senza un fuso dichiarato il calcolo torna a essere una differenza di
+    /// orologio, e conserva l'offset dell'istante ricevuto.
+    ///
+    /// E' il caso che ha fatto fallire la CI mentre in locale era verde: la
+    /// prima versione usava TimeZoneInfo.Local, che su una macchina di
+    /// sviluppo in Europe/Rome coincide con l'offset dei dati di prova e su un
+    /// runner in UTC no. Un calcolo che dipende dalla macchina su cui gira e'
+    /// esattamente il difetto che D-16 corregge, e rimetterlo nel calcolo
+    /// della scadenza sarebbe stato spostarlo, non risolverlo.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(-5)]
+    public void Senza_fuso_dichiarato_il_residuo_non_dipende_dalla_macchina(int offsetOre)
+    {
+        var o = new PurgeOptions
+        {
+            WindowEnabled = true,
+            WindowStart = new TimeOnly(1, 0),
+            WindowEnd = new TimeOnly(5, 0)
+        };
+
+        var adesso = new DateTimeOffset(2026, 9, 8, 3, 0, 0, TimeSpan.FromHours(offsetOre));
+
+        Assert.Equal(TimeSpan.FromHours(2), o.TimeUntilWindowEnd(adesso));
+    }
+
     [Fact]
     public void Un_fuso_sconosciuto_solleva_invece_di_ripiegare()
     {
@@ -168,8 +197,29 @@ public sealed class WindowTimeZoneTests
         Assert.Equal(new TimeOnly(14, 0), TimeOnly.FromDateTime(adesso.DateTime));  // CEST = UTC+2
     }
 
+    /// <summary>
+    /// Senza fuso dichiarato Now() delega al TimeProvider, che conosce il
+    /// proprio: un orologio finto con un fuso proprio deve essere rispettato,
+    /// altrimenti i test tornano a dipendere dalla macchina.
+    /// </summary>
+    [Fact]
+    public void Senza_fuso_dichiarato_Now_usa_quello_del_TimeProvider()
+    {
+        var o = new PurgeOptions();
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 7, 15, 12, 0, 0, TimeSpan.Zero))
+        {
+            Zona = TimeZoneInfo.CreateCustomTimeZone("Prova+3", TimeSpan.FromHours(3), "Prova+3", "Prova+3")
+        };
+
+        Assert.Equal(new TimeOnly(15, 0), TimeOnly.FromDateTime(o.Now(clock).DateTime));
+    }
+
     private sealed class FakeTimeProvider(DateTimeOffset now) : TimeProvider
     {
+        public TimeZoneInfo Zona { get; init; } = TimeZoneInfo.Utc;
+
         public override DateTimeOffset GetUtcNow() => now;
+
+        public override TimeZoneInfo LocalTimeZone => Zona;
     }
 }
