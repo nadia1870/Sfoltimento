@@ -621,3 +621,80 @@ che a quel punto segnalerebbe anche ciò che non c'entra.
   `Order` non parte più finché la topologia non viene aggiornata. È voluto:
   prima partiva e cancellava tutto il resto lasciando quegli aggregati a
   database senza che nessuno decidesse.
+
+---
+
+## D-16 — La finestra vive in un fuso dichiarato, e la sua scadenza è un istante
+
+**Contesto.** `PurgeWindowGuard` leggeva `TimeProvider.GetLocalNow()`: la
+finestra era l'ora locale dell'host, e nessuno dichiarava quale dovesse
+essere. In un container `TZ` non è impostata e il fuso locale è UTC, quindi
+"01:00–05:00" diventa 02:00–06:00 italiane d'inverno e 03:00–07:00 d'estate.
+Il purge girerebbe nell'ora sbagliata **tutte le notti**, senza errori e senza
+avvisi.
+
+Separatamente, `TimeUntilWindowEnd` sottraeva due `TimeOnly` — cioè misurava
+orologio — mentre il `CancellationTokenSource` che ne derivava misura tempo
+reale. Le due cose divergono di un'ora nelle notti di cambio ora.
+
+**Decisione.** Un `TimeZoneId` esplicito in configurazione, con il fuso
+dell'host solo come ripiego e **scritto nel log all'avvio**; e la scadenza
+calcolata costruendo l'istante di chiusura in quel fuso, non per differenza di
+orari.
+
+**Che cosa era rotto e cosa no.** Vale la pena registrarlo, perché il difetto
+era più circoscritto di quanto sembrasse: `IsWithinWindow` confronta ore di
+orologio ed era **corretto**, quindi il coordinatore fra una slice e l'altra si
+è sempre fermato all'ora giusta, anche nelle notti di cambio. A sbagliare era
+solo il token che governa le fasi lunghe — selezione, espansione — e in una
+sola direzione dannosa: nella notte di primavera la scadenza risultava un'ora
+più generosa, e una fase poteva proseguire fino alle 06:00. Nella notte
+d'autunno chiudeva un'ora prima, che costa lavoro non fatto e nient'altro.
+
+**Conseguenze.**
+
+- Un identificativo di fuso sconosciuto solleva all'avvio, che è il momento
+  giusto per accorgersene.
+- I due casi patologici del cambio ora sono gestiti esplicitamente: se
+  l'orario di chiusura non esiste (salto di primavera) si prende il primo
+  istante valido; se esiste due volte (ritorno all'ora solare) si prende il
+  primo, perché chiudere in anticipo costa lavoro e chiudere in ritardo porta
+  il purge nell'operatività.
+- Tutti i punti che leggevano l'orologio passano da `PurgeOptions.Now(clock)`,
+  che converte da UTC: nessuno dipende più dal fuso dell'host.
+
+---
+
+## D-17 — Un tetto al peso del singolo aggregato
+
+**Contesto.** `MaxRowsPerBatch` limita la slice, ma un aggregato che lo supera
+da solo diventa una slice dedicata **senza limite superiore**. Un collettivo
+da duecento componenti con molte revisioni può pesare centomila righe: una
+transazione che innesca la lock escalation e gonfia il log, cioè esattamente
+ciò che il packing esiste per evitare. Il commento nel codice diceva "si
+accetta consapevolmente un picco di lock", che è vero fino a un certo peso e
+falso oltre.
+
+**Decisione.** `MaxAggregateWeight` (default dieci volte `MaxRowsPerBatch`,
+zero disattiva): sopra quella soglia l'aggregato non viene assegnato a nessuna
+slice, passa a `Excluded` con motivo `AggregateTooLarge` e compare nel report.
+Resta a database finché qualcuno decide come trattarlo.
+
+**Perché escludere e non spezzare.** Spezzare un collettivo è escluso da D-3.
+Spezzare un ordine singolo con migliaia di revisioni sarebbe possibile — gli
+storici si potrebbero cancellare a lotti prima della testata — ma è un
+meccanismo nuovo, con una sua atomicità da dimostrare, per un caso che
+dovrebbe essere raro. Escludere e censire costa niente e rende il caso
+visibile; se il censimento mostrasse che è frequente, allora varrebbe la pena
+costruire lo spezzamento.
+
+**Conseguenze.**
+
+- Un tetto minore di `MaxRowsPerBatch` è rifiutato dal costruttore: renderebbe
+  indecidibile il caso intermedio, in cui un aggregato dovrebbe essere insieme
+  slice dedicata ed escluso.
+- `ApplyAssignments` ripete il filtro sugli esclusi in tutte e tre le `UPDATE`:
+  senza, uno storico o una testata collettiva finirebbero in una slice che non
+  contiene il loro ordine.
+- Il default va tarato sul p99 reale dopo il primo dry-run. Un valore troppo
+  basso trasforma in esclusioni aggregati che il motore reggerebbe.

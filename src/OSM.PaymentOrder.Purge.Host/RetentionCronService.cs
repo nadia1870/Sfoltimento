@@ -47,14 +47,14 @@ public sealed class RetentionCronService(
         {
             // Un run sospeso ha priorita' sul prossimo risveglio: se la finestra
             // e' aperta si riprende subito, senza attendere il cron.
-            if (_options.IsWithinWindow(clock.GetLocalNow())
+            if (_options.IsWithinWindow(_options.Now(clock))
                 && await HasResumableRunAsync(stoppingToken).ConfigureAwait(false))
             {
                 await RunAllStrategiesAsync(stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
-            var now = clock.GetLocalNow();
+            var now = _options.Now(clock);
             var next = schedule.GetNextOccurrence(now, tz);
             if (next is null)
             {
@@ -87,7 +87,7 @@ public sealed class RetentionCronService(
         // Controllo anticipato: aprire la finestra fuori orario produrrebbe una
         // scadenza gia' scaduta, e il primo await fallirebbe con una
         // cancellazione al posto di una riga di log comprensibile.
-        if (!_options.IsWithinWindow(clock.GetLocalNow()))
+        if (!_options.IsWithinWindow(_options.Now(clock)))
         {
             log.LogInformation("Fuori dalla finestra operativa: ciclo saltato.");
             return;
@@ -115,16 +115,28 @@ public sealed class RetentionCronService(
         {
             if (ct.IsCancellationRequested) return;
 
-            if (!_options.IsWithinWindow(clock.GetLocalNow()))
+            if (!_options.IsWithinWindow(_options.Now(clock)))
             {
                 log.LogInformation("Finestra chiusa: strategie residue rinviate.");
+                return;
+            }
+
+            // Vedi Program: il lock di sessione puo' essere stato rilasciato da
+            // una caduta di connessione senza che nessuno lo abbia notato.
+            try
+            {
+                await lease.EnsureHeldAsync(ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                log.LogError(ex, "PurgeLeaseLost Strategy={Strategy}: ciclo interrotto.", strategy);
                 return;
             }
 
             try
             {
                 var runId = await store.FindResumableAsync(strategy, window.Token).ConfigureAwait(false)
-                            ?? await store.CreateAsync(strategy, _options, clock.GetLocalNow(), window.Token)
+                            ?? await store.CreateAsync(strategy, _options, _options.Now(clock), window.Token)
                                           .ConfigureAwait(false);
 
                 await orchestrator.RunAsync(runId, window.Token).ConfigureAwait(false);

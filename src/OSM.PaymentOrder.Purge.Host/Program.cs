@@ -337,7 +337,9 @@ public static class Program
             sp.GetRequiredService<PurgeStrategyResolver>(),
             sp.GetRequiredService<ILogger<BatchPlanner>>(),
             bulkCopyTimeoutSeconds: sp.GetRequiredService<IOptions<PurgeOptions>>()
-                                      .Value.CommandTimeoutSeconds));
+                                      .Value.CommandTimeoutSeconds,
+            maxAggregateWeight: sp.GetRequiredService<IOptions<PurgeOptions>>()
+                                  .Value.MaxAggregateWeight));
 
         builder.Services.AddSingleton<DryRunReporter>();
         builder.Services.AddSingleton<SliceExecutor>();
@@ -406,14 +408,26 @@ public static class Program
         // ha cancellato nulla, che e' il modo peggiore di sbagliare.
         //
         // Le due configurazioni sono in disaccordo e qualcuno deve saperlo.
-        if (options.WindowEnabled && !options.IsWithinWindow(clock.GetLocalNow()))
+        // Il fuso della finestra viene dichiarato all'avvio: una configurazione
+        // sbagliata si vede qui, alla prima riga, invece che dai grafici di
+        // carico tre settimane dopo.
+        if (options.WindowEnabled)
+        {
+            log.LogInformation(
+                "PurgeWindow Fuso={Fuso} ({Origine}) Finestra={Start}-{End} OraCorrente={Now:HH:mm}",
+                options.TimeZone.Id,
+                options.TimeZoneId is null ? "fuso dell'host, non dichiarato" : "configurato",
+                options.WindowStart, options.WindowEnd, options.Now(clock));
+        }
+
+        if (options.WindowEnabled && !options.IsWithinWindow(options.Now(clock)))
         {
             log.LogError(
                 "PurgeOutsideWindow: avvio alle {Now:HH:mm} fuori dalla finestra " +
                 "{Start}-{End}. La pianificazione dello scheduler e la finestra " +
                 "configurata non concordano: allinearle, oppure usare {Flag} se " +
                 "l'esecuzione fuori orario e' voluta.",
-                clock.GetLocalNow(), options.WindowStart, options.WindowEnd, NoWindowFlag);
+                options.Now(clock), options.WindowStart, options.WindowEnd, NoWindowFlag);
 
             return 4;
         }
@@ -468,10 +482,24 @@ public static class Program
 
         foreach (var strategy in strategies)
         {
+            // Il lock e' di sessione e la sua connessione resta aperta per ore:
+            // se cade, SQL Server lo rilascia senza che il processo lo sappia.
+            // Si verifica qui, fra una strategia e l'altra, che e' un punto in
+            // cui fermarsi non lascia nulla a meta'.
+            try
+            {
+                await lease.EnsureHeldAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                log.LogError(ex, "PurgeLeaseLost Strategy={Strategy}", strategy);
+                return 1;
+            }
+
             try
             {
                 var runId = await store.FindResumableAsync(strategy, window.Token).ConfigureAwait(false)
-                            ?? await store.CreateAsync(strategy, options, clock.GetLocalNow(), window.Token)
+                            ?? await store.CreateAsync(strategy, options, options.Now(clock), window.Token)
                                           .ConfigureAwait(false);
 
                 Console.WriteLine($"{strategy,-16} run {runId}  DryRun={options.DryRun}");
