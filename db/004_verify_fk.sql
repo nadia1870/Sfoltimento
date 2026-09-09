@@ -61,7 +61,13 @@ WHERE (fk.is_disabled = 1 OR fk.is_not_trusted = 1)
 
 /* 4. Tabelle figlie di Order NON previste da PurgeTopology.
       Se questa query restituisce righe, il gruppo 3 e' incompleto e la
-      DELETE su Order fallira' con errore 547.                            */
+      DELETE su Order fallira' con errore 547.
+
+      Dalla revisione D-15 lo stesso controllo e' in SchemaVerifier e gira
+      automaticamente a ogni avvio, leggendo le tabelle attese direttamente
+      dalla topologia. Le liste qui sotto restano per chi esegue le verifiche
+      con sqlcmd senza avviare il motore, ma non sono piu' l'unica difesa:
+      se divergono dalla topologia, e' questa copia a essere vecchia.        */
 SELECT DISTINCT
     TabellaFiglia = QUOTENAME(sc.name) + '.' + QUOTENAME(tc.name)
 FROM sys.foreign_keys fk

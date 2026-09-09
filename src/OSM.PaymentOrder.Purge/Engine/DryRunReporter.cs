@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Extensions.Logging;
 using OSM.PaymentOrder.Purge.Data;
 using OSM.PaymentOrder.Purge.Domain;
@@ -15,6 +16,8 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
     private sealed record ExcludedRow(string? ExcludedReason, long Collectives);
 
     private sealed record SliceStatsRow(int SliceCount, int MinRows, int MaxRows, int AvgRows, int Oversized);
+
+    private sealed record UnknownStatusRow(string StatusCode, long OltreSoglia, DateTime? PiuVecchio);
 
     public async Task<DryRunReport> ProduceAsync(PurgeRun run, CancellationToken ct)
     {
@@ -62,6 +65,32 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
 
         report.UnassignedOrders = await sql.ScalarAsync<long>(RetentionSql.CountUnassigned, ct, p)
                                            .ConfigureAwait(false);
+
+        // Censimento degli stati sconosciuti, una volta per run e solo dove ha
+        // senso: le strategie che si ancorano a ExecutionDate. Non e' un
+        // controllo — se uno stato nuovo sia terminale lo sa il dominio, non il
+        // purge — ma senza questa riga nel report la domanda non verrebbe mai
+        // posta, e gli ordini in quello stato resterebbero a database per
+        // sempre senza che nulla lo segnali.
+        if (run.Strategy is RetentionStrategy.Terminated or RetentionStrategy.Collective)
+        {
+            var sconosciuti = await sql.QueryAsync<UnknownStatusRow>(
+                RetentionSql.CountUnknownStatuses, ct,
+                SqlParam.Typed("@Cutoff", run.RetentionCutoff, SqlDbType.DateTime2))
+                .ConfigureAwait(false);
+
+            foreach (var u in sconosciuti)
+                report.AddUnknownStatus(u.StatusCode, u.OltreSoglia, u.PiuVecchio);
+
+            if (sconosciuti.Count > 0)
+            {
+                log.LogWarning(
+                    "PurgeUnknownStatuses RunId={RunId} Stati={Stati}. Nessun ordine in questi " +
+                    "stati verra' mai sfoltito: verificare se sono conclusivi.",
+                    run.RunId,
+                    string.Join(", ", sconosciuti.Select(u => $"{u.StatusCode}={u.OltreSoglia}")));
+            }
+        }
 
         // In dry-run RunBatchProgress non viene popolata: le statistiche
         // vengono ricavate direttamente dalle assegnazioni prodotte dal planner.

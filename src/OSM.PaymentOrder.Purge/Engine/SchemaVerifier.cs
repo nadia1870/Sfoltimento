@@ -122,6 +122,58 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
         return missing;
     }
 
+    /// <summary>
+    /// Figlie reali di Order e OrderHistory, dalle foreign key del database.
+    /// </summary>
+    private const string ChildQuery = """
+        SELECT Parent = tp.name, Child = tc.name
+        FROM sys.foreign_keys AS fk
+        JOIN sys.tables  AS tc ON tc.object_id = fk.parent_object_id
+        JOIN sys.tables  AS tp ON tp.object_id = fk.referenced_object_id
+        JOIN sys.schemas AS sp ON sp.schema_id = tp.schema_id
+        WHERE sp.name = 'PaymentOrder'
+          AND tp.name IN ('Order', 'OrderHistory')
+        GROUP BY tp.name, tc.name;
+        """;
+
+    private sealed record ChildRow(string Parent, string Child);
+
+    /// <summary>
+    /// Tabelle che referenziano Order o OrderHistory e che la topologia non
+    /// conosce. E' il caso opposto a quello delle tabelle mancanti, e il piu'
+    /// pericoloso: nessuna DELETE le tocca, la foreign key blocca la
+    /// cancellazione della testata, e il sintomo arriva di notte come una
+    /// sequenza di aggregati abbandonati con errore 547.
+    ///
+    /// Il controllo guarda solo i due genitori dell'aggregato. Una tabella
+    /// nuova che referenzia un dettaglio — poniamo BankTransfer — non e'
+    /// coperta: sarebbe un grafo diverso da quello che la topologia descrive,
+    /// e andrebbe affrontata li', non con un controllo piu' largo.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> FindUnexpectedChildrenAsync(CancellationToken ct)
+    {
+        var reali = await sql.QueryAsync<ChildRow>(ChildQuery, ct).ConfigureAwait(false);
+        var attesi = PurgeTopology.ExpectedChildren()
+            .ToDictionary(e => e.Parent, e => e.Children, StringComparer.OrdinalIgnoreCase);
+
+        var inattese = reali
+            .Where(r => attesi.TryGetValue(r.Parent, out var figli) && !figli.Contains(r.Child))
+            .Select(r => $"PaymentOrder.{r.Child} -> {r.Parent}")
+            .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (inattese.Count > 0)
+        {
+            log.LogError(
+                "PurgeSchemaDrift: {Count} tabelle referenziano l'aggregato Order senza essere " +
+                "in PurgeTopology. La cancellazione fallirebbe con errore 547.{NewLine}  {List}",
+                inattese.Count, Environment.NewLine,
+                string.Join(Environment.NewLine + "  ", inattese));
+        }
+
+        return inattese;
+    }
+
     /// <summary>Come sopra, ma interrompe l'avvio se lo schema non e' allineato.</summary>
     public async Task EnsureAsync(CancellationToken ct)
     {
@@ -146,6 +198,20 @@ public sealed class SchemaVerifier(ISqlExecutor sql, ILogger<SchemaVerifier> log
             throw new InvalidOperationException(
                 "Lo schema Purge e' incompleto: alcune migrazioni non sono state applicate. " +
                 $"Colonne assenti: {string.Join(", ", missingColumns)}.");
+        }
+
+        // Per ultimo: le due verifiche sopra riguardano cio' che manca, questa
+        // cio' che e' comparso. Un'applicazione che aggiunge una tabella
+        // legata a Order non sa del purge, e nessuno aggiorna la topologia per
+        // conto suo.
+        var inattese = await FindUnexpectedChildrenAsync(ct).ConfigureAwait(false);
+        if (inattese.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Lo schema applicativo contiene tabelle che referenziano l'aggregato Order " +
+                $"e che PurgeTopology non conosce: {string.Join(", ", inattese)}. " +
+                "Aggiungerle alla topologia — con il gruppo di cancellazione corretto — " +
+                "oppure verificare che la loro cancellazione avvenga altrove.");
         }
     }
 }

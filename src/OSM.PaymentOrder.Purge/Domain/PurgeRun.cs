@@ -212,6 +212,19 @@ public sealed class DryRunReport
     public void AddExcludedCollectives(string reason, long count) =>
         _excludedCollectives[reason] = count;
 
+    /// <summary>
+    /// Stati non riconosciuti come terminali, con quanti ordini oltre soglia
+    /// li portano. Vuoto e' l'esito normale. Non entra in Lines per la stessa
+    /// ragione dei collettivi esclusi: non sono nomi di tabella.
+    /// </summary>
+    public IReadOnlyList<(string StatusCode, long Count, DateTime? Oldest)> UnknownStatuses =>
+        _unknownStatuses;
+
+    private readonly List<(string StatusCode, long Count, DateTime? Oldest)> _unknownStatuses = [];
+
+    public void AddUnknownStatus(string statusCode, long count, DateTime? oldest) =>
+        _unknownStatuses.Add((statusCode, count, oldest));
+
     public long OrderCount => _lines.GetValueOrDefault("Order");
     public long TotalRows => _lines.Values.Sum();
 
@@ -237,6 +250,15 @@ public sealed class DryRunReport
             sb.AppendLine("Collettivi esclusi e censiti (non verranno cancellati):");
             foreach (var (reason, count) in _excludedCollectives.OrderBy(e => e.Key))
                 sb.AppendLine($"  {reason,-34}{count,14:N0}");
+        }
+        if (_unknownStatuses.Count > 0)
+        {
+            sb.AppendLine("Stati non riconosciuti come terminali, oltre soglia:");
+            foreach (var (status, count, oldest) in _unknownStatuses)
+                sb.AppendLine($"  {status,-34}{count,14:N0}   dal {oldest:yyyy-MM-dd}");
+            sb.AppendLine("  ^ questi ordini non verranno mai sfoltiti finche' lo stato");
+            sb.AppendLine("    non viene aggiunto a RetentionSql.TerminalStates. Verificare");
+            sb.AppendLine("    con il referente applicativo se sono stati conclusivi.");
         }
         if (UnassignedOrders > 0)
             sb.AppendLine($"ATTENZIONE: {UnassignedOrders:N0} ordini senza BatchNo");

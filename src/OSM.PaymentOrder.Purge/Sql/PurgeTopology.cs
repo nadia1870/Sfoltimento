@@ -17,6 +17,31 @@ public static class PurgeTopology
 {
     public const string Schema = "PaymentOrder";
 
+    /// <summary>
+    /// Genitori il cui insieme di figli deve restare quello atteso, con i
+    /// figli previsti per ciascuno.
+    ///
+    /// Serve al controllo di deriva dello schema: una tabella nuova che
+    /// referenzia Order o OrderHistory non compare in nessuna DELETE, e la
+    /// foreign key fa fallire la cancellazione della testata con errore 547 —
+    /// di notte, aggregato per aggregato dopo la bisezione. Meglio scoprirlo
+    /// all'avvio.
+    ///
+    /// La lista e' derivata dai gruppi sotto, non riscritta a mano: una
+    /// tabella aggiunta alla topologia compare qui da sola. Vanno elencate a
+    /// parte solo le figlie che la topologia non cancella per join diretto.
+    /// </summary>
+    public static IEnumerable<(string Parent, IReadOnlyCollection<string> Children)> ExpectedChildren()
+    {
+        yield return ("Order", DetailTables
+            .Concat(["OrderHistory"])
+            .ToHashSet(StringComparer.OrdinalIgnoreCase));
+
+        yield return ("OrderHistory", DetailHistoryTables
+            .Select(t => t.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
     /// <summary>Gruppo 1 — storici di dettaglio. Join su RunCandidateOrderHistory.</summary>
     public static readonly IReadOnlyList<DetailHistoryTable> DetailHistoryTables =
     [

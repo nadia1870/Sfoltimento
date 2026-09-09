@@ -318,6 +318,35 @@ public static class RetentionSql
                           AND x.OrderId = d.OrderId));
         """;
 
+    /// <summary>
+    /// Stati presenti su Order che non sono nell'elenco dei terminali, con il
+    /// conteggio degli ordini oltre soglia che li portano.
+    ///
+    /// Non e' un controllo: nessuno puo' sapere da qui se uno stato nuovo sia
+    /// terminale, e' una domanda di dominio. E' un censimento, e serve a porla.
+    /// Uno stato conclusivo aggiunto dall'applicazione e non aggiunto a
+    /// TerminalStates non produce alcun errore: quegli ordini semplicemente non
+    /// diventano mai eleggibili, e nessuno se ne accorge per anni. E' l'unica
+    /// deriva dello schema che resta silenziosa.
+    ///
+    /// Il conteggio e' limitato agli ordini oltre soglia perche' e' quello che
+    /// rende la domanda urgente: uno stato sconosciuto con due milioni di righe
+    /// vecchie di sei anni e' un problema, con dieci righe di ieri no.
+    /// </summary>
+    public const string CountUnknownStatuses = $"""
+        SELECT StatusCode  = o.StatusCode,
+               OltreSoglia = COUNT_BIG(*),
+               PiuVecchio  = MIN(o.ExecutionDate)
+        FROM {S}.[Order] AS o
+        WHERE o.StatusCode NOT IN ({TerminalStates})
+          AND o.StatusCode NOT IN ('Created','PartiallyAuthorised')
+          AND o.ExecutionDate >= '{MinValidDate}'
+          AND o.ExecutionDate <  @Cutoff
+        GROUP BY o.StatusCode
+        HAVING COUNT_BIG(*) > 0
+        ORDER BY COUNT_BIG(*) DESC;
+        """;
+
     /// <summary>Collettivi esclusi per motivo, per il report del dry-run.</summary>
     public const string CountExcludedCollectivesByReason = """
         SELECT ExcludedReason, Collectives = COUNT_BIG(*)
