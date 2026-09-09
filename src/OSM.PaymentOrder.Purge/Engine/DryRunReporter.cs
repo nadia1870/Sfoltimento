@@ -19,6 +19,8 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
 
     private sealed record UnknownStatusRow(string StatusCode, long OltreSoglia, DateTime? PiuVecchio);
 
+    private sealed record TooLargeRow(long Aggregati, int? PesoMax);
+
     public async Task<DryRunReport> ProduceAsync(PurgeRun run, CancellationToken ct)
     {
         var report = new DryRunReport { RunId = run.RunId };
@@ -65,6 +67,21 @@ public sealed class DryRunReporter(ISqlExecutor sql, ILogger<DryRunReporter> log
 
         report.UnassignedOrders = await sql.ScalarAsync<long>(RetentionSql.CountUnassigned, ct, p)
                                            .ConfigureAwait(false);
+
+        // Aggregati oltre il tetto: non verranno cancellati e restano a
+        // database. Come i collettivi esclusi, sono cio' che il report deve
+        // dire a chi lo approva: un conteggio di righe cancellate non basta a
+        // capire cosa NON succedera'.
+        var troppoGrandi = await sql.QueryAsync<TooLargeRow>(
+            RetentionSql.CountAggregatesTooLarge, ct, p).ConfigureAwait(false);
+
+        if (troppoGrandi.Count > 0 && troppoGrandi[0].Aggregati > 0)
+        {
+            report.AddExcludedAggregates(troppoGrandi[0].Aggregati, troppoGrandi[0].PesoMax);
+            log.LogWarning(
+                "PurgeAggregatesTooLarge RunId={RunId} Aggregati={Count} PesoMax={Peso}",
+                run.RunId, troppoGrandi[0].Aggregati, troppoGrandi[0].PesoMax);
+        }
 
         // Censimento degli stati sconosciuti, una volta per run e solo dove ha
         // senso: le strategie che si ancorano a ExecutionDate. Non e' un

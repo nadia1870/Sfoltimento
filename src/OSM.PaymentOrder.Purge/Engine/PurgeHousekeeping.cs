@@ -45,7 +45,7 @@ public sealed class PurgeHousekeeping(
             return 0;
         }
 
-        var now = clock.GetLocalNow();
+        var now = _options.Now(clock);
         var completedCutoff = now.AddDays(-_options.StagingRetentionDays);
         var failedCutoff = now.AddDays(-_options.FailedStagingRetentionDays);
 
@@ -69,7 +69,7 @@ public sealed class PurgeHousekeeping(
 
             // Rispetta la finestra operativa come tutto il resto: l'housekeeping
             // non e' urgente e non deve rubare risorse all'OLTP.
-            if (!_options.IsWithinWindow(clock.GetLocalNow()))
+            if (!_options.IsWithinWindow(_options.Now(clock)))
             {
                 log.LogInformation("Housekeeping interrotto: finestra chiusa. Ripulisi={Cleaned}", cleaned);
                 break;

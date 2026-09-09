@@ -100,6 +100,25 @@ public sealed class PurgeOptions
     [Range(0, 20)]
     public int MaxSplitDepth { get; set; } = 10;
 
+    /// <summary>
+    /// Peso oltre il quale un aggregato non viene cancellato automaticamente,
+    /// ma escluso e censito. Zero disattiva il limite.
+    ///
+    /// MaxRowsPerBatch e' il tetto della slice, ma un aggregato che lo supera
+    /// da solo diventa una slice dedicata — e finora senza limite superiore.
+    /// Un collettivo da duecento componenti con molte revisioni puo' pesare
+    /// centomila righe: una transazione che innesca la lock escalation e
+    /// gonfia il log, cioe' esattamente cio' che il packing esiste per
+    /// evitare. Sopra questa soglia l'aggregato resta a database e compare nel
+    /// censimento, come i collettivi anomali di D-10.
+    ///
+    /// Il default e' dieci volte MaxRowsPerBatch: alto abbastanza da non
+    /// scattare mai sui dati normali, basso abbastanza da intercettare il caso
+    /// patologico. Va tarato sul p99 reale dopo il primo dry-run.
+    /// </summary>
+    [Range(0, 10_000_000)]
+    public int MaxAggregateWeight { get; set; } = 30_000;
+
     public TimeSpan InterSliceDelay { get; set; } = TimeSpan.FromMilliseconds(100);
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(5);
 
@@ -156,6 +175,39 @@ public sealed class PurgeOptions
     public int HousekeepingMaxRunsPerCycle { get; set; } = 50;
 
     // -------------------------------------------------------------- finestra
+
+    /// <summary>
+    /// Fuso orario in cui vanno letti WindowStart e WindowEnd. Null significa
+    /// il fuso dell'host.
+    ///
+    /// Va valorizzato in produzione. In un container TZ non e' impostata e il
+    /// fuso locale e' UTC: "01:00-05:00" diventa 02:00-06:00 italiane
+    /// d'inverno e 03:00-07:00 d'estate. Il purge girerebbe nell'ora sbagliata
+    /// tutte le notti, senza errori e senza avvisi — se ne accorgerebbe solo
+    /// chi nota che il carico arriva a operativita' gia' avviata.
+    ///
+    /// Accetta sia gli identificativi Windows ("W. Europe Standard Time") sia
+    /// quelli IANA ("Europe/Rome"): da .NET 8 sono equivalenti su entrambe le
+    /// piattaforme. Un identificativo sconosciuto solleva all'avvio, che e'
+    /// il momento giusto per accorgersene.
+    /// </summary>
+    public string? TimeZoneId { get; set; }
+
+    private TimeZoneInfo? _timeZone;
+
+    /// <summary>Fuso risolto, con il fuso dell'host come ripiego.</summary>
+    public TimeZoneInfo TimeZone => _timeZone ??=
+        string.IsNullOrWhiteSpace(TimeZoneId)
+            ? TimeZoneInfo.Local
+            : TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
+
+    /// <summary>
+    /// Ora corrente nel fuso della finestra. Da usare ovunque al posto di
+    /// TimeProvider.GetLocalNow(): quest'ultima dipende dall'host, questa da
+    /// una configurazione dichiarata.
+    /// </summary>
+    public DateTimeOffset Now(TimeProvider clock) =>
+        TimeZoneInfo.ConvertTime(clock.GetUtcNow(), TimeZone);
 
     public bool WindowEnabled { get; set; } = true;
     public TimeOnly WindowStart { get; set; } = new(1, 0);
@@ -245,12 +297,51 @@ public sealed class PurgeOptions
         if (!WindowEnabled) return null;
         if (!IsWithinWindow(now)) return TimeSpan.Zero;
 
-        var remaining = WindowEnd.ToTimeSpan() - TimeOnly.FromDateTime(now.DateTime).ToTimeSpan();
+        // Si costruisce l'ISTANTE di chiusura e si sottrae, invece di
+        // sottrarre due orari.
+        //
+        // La differenza conta due volte l'anno. Il timer che nasce da questo
+        // valore misura tempo reale; la sottrazione fra due TimeOnly misura
+        // orologio, e nelle notti di cambio ora le due cose divergono di
+        // un'ora. Nella notte di primavera la scadenza risultava piu'
+        // generosa di sessanta minuti, e una fase lunga poteva proseguire
+        // dentro l'orario lavorativo: esattamente cio' che la finestra esiste
+        // per impedire.
+        var local = now.DateTime;
+        var oggi = DateOnly.FromDateTime(local);
+        var adesso = TimeOnly.FromDateTime(local);
 
-        // Negativo significa che la chiusura cade dopo la mezzanotte rispetto
-        // a ora: e' il caso della finestra a cavallo, non un errore.
-        if (remaining <= TimeSpan.Zero) remaining += TimeSpan.FromDays(1);
+        // Se la chiusura e' gia' passata sull'orologio di oggi ma siamo dentro
+        // la finestra, allora la finestra e' a cavallo della mezzanotte e la
+        // chiusura cade domani.
+        var giornoChiusura = adesso < WindowEnd ? oggi : oggi.AddDays(1);
 
-        return remaining;
+        var chiusura = ToInstant(giornoChiusura.ToDateTime(WindowEnd));
+        var residuo = chiusura - now;
+
+        return residuo > TimeSpan.Zero ? residuo : TimeSpan.Zero;
+    }
+
+    /// <summary>
+    /// Istante corrispondente a un orario locale nel fuso della finestra,
+    /// gestendo i due casi patologici del cambio ora.
+    /// </summary>
+    private DateTimeOffset ToInstant(DateTime local)
+    {
+        // Ora inesistente (salto di primavera): l'orario configurato non
+        // esiste in questa data. Si prende il primo istante valido dopo.
+        for (var i = 0; i < 8 && TimeZone.IsInvalidTime(local); i++)
+            local = local.AddMinutes(15);
+
+        if (TimeZone.IsAmbiguousTime(local))
+        {
+            // Ora doppia (ritorno all'ora solare): due istanti corrispondono a
+            // questo orario. Si sceglie il primo, cioe' l'offset maggiore.
+            // Chiudere in anticipo costa un'ora di lavoro non fatto; chiudere
+            // in ritardo porta il purge nell'orario lavorativo.
+            return new DateTimeOffset(local, TimeZone.GetAmbiguousTimeOffsets(local).Max());
+        }
+
+        return new DateTimeOffset(local, TimeZone.GetUtcOffset(local));
     }
 }

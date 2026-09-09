@@ -44,7 +44,7 @@ public sealed class BatchExecutionCoordinator(
             // CompletedRun after the token has been cancelled.
             ct.ThrowIfCancellationRequested();
 
-            if (!_options.IsWithinWindow(clock.GetLocalNow()))
+            if (!_options.IsWithinWindow(_options.Now(clock)))
             {
                 log.LogInformation(
                     "Fine finestra operativa: RunId={RunId} sospeso, slice completate={Completed}",
@@ -176,7 +176,7 @@ public sealed class BatchExecutionCoordinator(
             // l'ultima slice non paga un InterSliceDelay inutile. Il provider
             // legge soltanto il checkpoint e non riserva la slice, quindi il
             // look-ahead non altera la semantica del contratto.
-            if (!_options.IsWithinWindow(clock.GetLocalNow()))
+            if (!_options.IsWithinWindow(_options.Now(clock)))
             {
                 log.LogInformation(
                     "Fine finestra operativa dopo la slice: RunId={RunId} sospeso, slice completate={Completed}",

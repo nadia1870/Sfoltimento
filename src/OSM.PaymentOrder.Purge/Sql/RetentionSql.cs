@@ -347,6 +347,13 @@ public static class RetentionSql
         ORDER BY COUNT_BIG(*) DESC;
         """;
 
+    /// <summary>Aggregati esclusi perche' oltre MaxAggregateWeight, per il report.</summary>
+    public const string CountAggregatesTooLarge = """
+        SELECT Aggregati = COUNT_BIG(*), PesoMax = MAX(RowWeight)
+        FROM Purge.RunCandidateOrder
+        WHERE RunId = @RunId AND State = 'Excluded' AND ExcludedReason = 'AggregateTooLarge';
+        """;
+
     /// <summary>Collettivi esclusi per motivo, per il report del dry-run.</summary>
     public const string CountExcludedCollectivesByReason = """
         SELECT ExcludedReason, Collectives = COUNT_BIG(*)
@@ -588,22 +595,37 @@ public static class RetentionSql
         CREATE TABLE #assign (OrderId UNIQUEIDENTIFIER PRIMARY KEY,
                               BatchNo INT NOT NULL,
                               IsOversized BIT NOT NULL,
-                              CollectiveOrderId UNIQUEIDENTIFIER NULL);
+                              CollectiveOrderId UNIQUEIDENTIFIER NULL,
+                              Excluded BIT NOT NULL);
         """;
 
+    /// <summary>
+    /// Gli aggregati oltre MaxAggregateWeight non ricevono un BatchNo: passano
+    /// a 'Excluded' con il motivo, come i collettivi anomali di D-10. Il
+    /// filtro Excluded = 0 va ripetuto in tutte e tre le UPDATE, altrimenti
+    /// uno storico o una testata collettiva finirebbero in una slice che non
+    /// contiene il loro ordine.
+    /// </summary>
     public const string ApplyAssignments = """
+        UPDATE c
+           SET c.State = 'Excluded', c.ExcludedReason = 'AggregateTooLarge',
+               c.BatchNo = NULL, c.CollectiveOrderId = a.CollectiveOrderId
+        FROM Purge.RunCandidateOrder AS c
+        INNER JOIN #assign AS a ON a.OrderId = c.OrderId
+        WHERE c.RunId = @RunId AND a.Excluded = 1;
+
         UPDATE c
            SET c.BatchNo = a.BatchNo, c.IsOversized = a.IsOversized, c.CollectiveOrderId = a.CollectiveOrderId
         FROM Purge.RunCandidateOrder AS c
         INNER JOIN #assign AS a ON a.OrderId = c.OrderId
-        WHERE c.RunId = @RunId;
+        WHERE c.RunId = @RunId AND a.Excluded = 0;
 
         UPDATE h
            SET h.BatchNo = c.BatchNo
         FROM Purge.RunCandidateOrderHistory AS h
         INNER JOIN Purge.RunCandidateOrder AS c
                 ON c.OrderId = h.OrderId AND c.RunId = h.RunId
-        WHERE h.RunId = @RunId;
+        WHERE h.RunId = @RunId AND c.State = 'Selected';
 
         UPDATE rc
            SET rc.BatchNo = a.BatchNo
@@ -611,7 +633,7 @@ public static class RetentionSql
         INNER JOIN (
             SELECT CollectiveOrderId, BatchNo
             FROM #assign
-            WHERE CollectiveOrderId IS NOT NULL
+            WHERE CollectiveOrderId IS NOT NULL AND Excluded = 0
             GROUP BY CollectiveOrderId, BatchNo
         ) AS a ON a.CollectiveOrderId = rc.CollectiveOrderId
         WHERE rc.RunId = @RunId;

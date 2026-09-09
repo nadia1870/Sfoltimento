@@ -91,6 +91,16 @@ public sealed class SliceExecutor(
 
             // Rivalidazione: se un ordine ha cambiato stato fra selezione ed
             // esecuzione, la DELETE del gruppo 4 ne cancella meno del previsto.
+            //
+            // Il confronto sul conteggio equivale a un confronto sull'insieme,
+            // ma solo perche' tre cose sono vere insieme: la chiave primaria
+            // (RunId, OrderId) sullo staging impedisce i duplicati; la DELETE
+            // fa join su quell'elenco congelato, quindi non puo' toccare altri
+            // ordini; e il predicato di stato sta DENTRO la DELETE, non in un
+            // controllo precedente. Togliere il predicato — sembra ridondante,
+            // l'elenco e' gia' filtrato in selezione — farebbe smettere questa
+            // riga di rivalidare senza che nulla lo segnali.
+            // RevalidationContractTests fissa le tre condizioni.
             // Procedere lascerebbe a database un ordine privo di storico e
             // dettagli, che e' molto peggio del non fare nulla.
             //

@@ -30,7 +30,8 @@ public sealed class BatchPlanner(
     PurgeStrategyResolver strategyResolver,
     ILogger<BatchPlanner> log,
     int flushEvery = 50_000,
-    int bulkCopyTimeoutSeconds = 300)
+    int bulkCopyTimeoutSeconds = 300,
+    int maxAggregateWeight = 0)
 {
     private readonly int _flushEvery = flushEvery > 0
         ? flushEvery
@@ -39,6 +40,11 @@ public sealed class BatchPlanner(
     private readonly int _bulkCopyTimeoutSeconds = bulkCopyTimeoutSeconds >= 0
         ? bulkCopyTimeoutSeconds
         : throw new ArgumentOutOfRangeException(nameof(bulkCopyTimeoutSeconds));
+
+    /// <summary>Tetto per aggregato: zero lo disattiva. Vedi PurgeOptions.MaxAggregateWeight.</summary>
+    private readonly int _maxAggregateWeight = maxAggregateWeight >= 0
+        ? maxAggregateWeight
+        : throw new ArgumentOutOfRangeException(nameof(maxAggregateWeight));
 
     public async Task<int> PlanAsync(PurgeRun run, CancellationToken ct)
     {
@@ -50,13 +56,14 @@ public sealed class BatchPlanner(
             await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
         var buffer = NewTable();
-        var packer = new BatchPacker(run.MaxRowsPerBatch, run.MaxOrdersPerBatch);
+        var packer = new BatchPacker(run.MaxRowsPerBatch, run.MaxOrdersPerBatch, _maxAggregateWeight);
         void AddAssignments(IReadOnlyList<BatchPacker.Assignment> assignments)
         {
             foreach (var assignment in assignments)
             {
                 buffer.Rows.Add(assignment.OrderId, assignment.BatchNo,
-                    assignment.IsOversized, assignment.CollectiveOrderId is Guid id ? id : DBNull.Value);
+                    assignment.IsOversized, assignment.CollectiveOrderId is Guid id ? id : DBNull.Value,
+                    assignment.Excluded);
             }
 
         }
@@ -160,6 +167,16 @@ public sealed class BatchPlanner(
             "Oversized={Oversized} MaxRighe={MaxRows} MaxOrdini={MaxOrders} CollectiveAtomic={CollectiveAtomic}",
             run.RunId, packer.Total, sliceCount, packer.OversizedCount, run.MaxRowsPerBatch, run.MaxOrdersPerBatch,
             run.Strategy == RetentionStrategy.Collective);
+        if (packer.TooLargeCount > 0)
+        {
+            log.LogWarning(
+                "PurgeAggregateTooLarge RunId={RunId} Aggregati={Count} Tetto={Limite}: " +
+                "oltre il tetto per aggregato, esclusi e censiti, restano a database. " +
+                "Se il numero non e' trascurabile, il tetto va rivisto o quegli aggregati " +
+                "vanno trattati a parte.",
+                run.RunId, packer.TooLargeCount, _maxAggregateWeight);
+        }
+
         if (packer.OversizedCount > 0)
         {
             log.LogWarning(
@@ -252,6 +269,7 @@ public sealed class BatchPlanner(
         t.Columns.Add("BatchNo", typeof(int));
         t.Columns.Add("IsOversized", typeof(bool));
         t.Columns.Add("CollectiveOrderId", typeof(Guid));
+        t.Columns.Add("Excluded", typeof(bool));
         return t;
     }
 
@@ -266,6 +284,13 @@ public sealed class BatchPlanner(
         bulk.ColumnMappings.Add("BatchNo", "BatchNo");
         bulk.ColumnMappings.Add("IsOversized", "IsOversized");
         bulk.ColumnMappings.Add("CollectiveOrderId", "CollectiveOrderId");
+        bulk.ColumnMappings.Add("Excluded", "Excluded");
+
+        // I mapping sono espliciti di proposito: senza, SqlBulkCopy va per
+        // posizione e una colonna aggiunta in mezzo scriverebbe nel posto
+        // sbagliato in silenzio. Il prezzo e' che una colonna nuova va
+        // aggiunta in tre punti — DataTable, temp table, questa lista — e
+        // dimenticare qui produce un NOT NULL violato al primo flush.
         await bulk.WriteToServerAsync(table, ct).ConfigureAwait(false);
     }
 }

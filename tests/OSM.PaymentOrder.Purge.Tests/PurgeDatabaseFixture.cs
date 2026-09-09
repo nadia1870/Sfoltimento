@@ -120,6 +120,11 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
             o.WindowEnabled = false;
             o.HousekeepingEnabled = false;
             o.MaxRowsPerBatch = 50;
+
+            // Tetto per aggregato disattivato: con MaxRowsPerBatch = 50 un
+            // default proporzionato scatterebbe su seed che non lo riguardano.
+            // I test che lo esercitano lo impostano da se'.
+            o.MaxAggregateWeight = 0;
             // Deliberatamente sotto il minimo consentito in produzione. La
             // validazione delle annotazioni non gira in fixture, e un valore
             // cosi' basso fa si' che ogni test esistente attraversi piu'
@@ -150,7 +155,9 @@ public sealed class PurgeDatabaseFixture : IAsyncLifetime
             sp.GetRequiredService<PurgeStrategyResolver>(),
             sp.GetRequiredService<ILogger<BatchPlanner>>(),
             bulkCopyTimeoutSeconds: sp.GetRequiredService<IOptions<PurgeOptions>>()
-                                      .Value.CommandTimeoutSeconds));
+                                      .Value.CommandTimeoutSeconds,
+            maxAggregateWeight: sp.GetRequiredService<IOptions<PurgeOptions>>()
+                                  .Value.MaxAggregateWeight));
         services.AddSingleton<DryRunReporter>();
 
         services.AddSingleton<SliceExecutor>();

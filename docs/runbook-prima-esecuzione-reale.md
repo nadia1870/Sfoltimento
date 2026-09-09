@@ -283,6 +283,39 @@ numeri sono stati letti.
 
 ---
 
+## 9. Manutenzione del database dopo lo sfoltimento
+
+Il purge cancella righe; non rimette in ordine ciò che resta. Due conseguenze
+che nessuno vede finché non diventano un problema di prestazioni.
+
+**Frammentazione degli indici.** Cancellare milioni di righe lascia pagine
+B-tree parzialmente vuote sulle tabelle toccate — `Order`, `OrderHistory`, le
+tabelle di dettaglio. Le scansioni successive leggono più pagine del
+necessario.
+
+**Statistiche obsolete.** L'ottimizzatore continua a stimare cardinalità che
+non esistono più. È il danno maggiore dei due, perché non degrada le
+prestazioni in modo graduale: cambia i piani di esecuzione, e un piano
+sbagliato su una query dell'operatività si manifesta come un rallentamento
+improvviso, settimane dopo il purge, senza un nesso evidente.
+
+Non è lavoro del motore: è manutenzione del database, e va nel piano del DBA.
+Ma va programmata, perché oggi non è prevista da nessuna parte.
+
+- Dopo il **primo sfoltimento massivo**, che è quello che rimuove l'arretrato:
+  `UPDATE STATISTICS` sulle tabelle dell'aggregato, e una valutazione della
+  frammentazione (`sys.dm_db_index_physical_stats`) per decidere fra
+  `REORGANIZE` e `REBUILD`. Il `REBUILD` va fatto in finestra, o con
+  `ONLINE = ON` se l'edizione lo consente.
+- **A regime**, quando ogni notte rimuove il flusso annuo invece
+  dell'arretrato, il volume è molto minore: di norma basta che le tabelle
+  rientrino nel piano di manutenzione ordinario.
+- Verificare che l'aggiornamento automatico delle statistiche sia attivo. Con
+  tabelle grandi la soglia di riconteggio automatico può non scattare per
+  molto tempo anche dopo cancellazioni consistenti.
+
+---
+
 ## Riepilogo dei comandi
 
 ```bash

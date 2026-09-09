@@ -39,7 +39,7 @@ public sealed class PurgeWindowGuard(
     public PurgeWindowScope Open(CancellationToken outer)
     {
         var opzioni = options.Value;
-        var residuo = opzioni.TimeUntilWindowEnd(clock.GetLocalNow());
+        var residuo = opzioni.TimeUntilWindowEnd(opzioni.Now(clock));
 
         if (residuo is null)
         {

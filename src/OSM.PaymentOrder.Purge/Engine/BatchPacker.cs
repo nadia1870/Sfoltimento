@@ -17,10 +17,17 @@ namespace OSM.PaymentOrder.Purge.Engine;
 internal sealed class BatchPacker
 {
     internal sealed record Candidate(Guid OrderId, int Weight, Guid? CollectiveOrderId);
-    internal sealed record Assignment(Guid OrderId, int BatchNo, bool IsOversized, Guid? CollectiveOrderId);
+    /// <summary>
+    /// Assegnazione di un candidato a una slice. Con Excluded a vero
+    /// l'aggregato non viene assegnato ad alcuna slice: supera
+    /// MaxAggregateWeight e resta a database, censito.
+    /// </summary>
+    internal sealed record Assignment(
+        Guid OrderId, int BatchNo, bool IsOversized, Guid? CollectiveOrderId, bool Excluded = false);
 
     private readonly int _maxRowsPerBatch;
     private readonly int _maxOrdersPerBatch;
+    private readonly int _maxAggregateWeight;
     private readonly List<Candidate> _collectiveBuffer = [];
     private Guid? _currentCollective;
     private int _collectiveWeight;
@@ -28,19 +35,40 @@ internal sealed class BatchPacker
     private int _rowsInBatch;
     private int _ordersInBatch;
     private int _oversized;
+    private int _tooLarge;
     private int _total;
     private bool _completed;
 
-    internal BatchPacker(int maxRowsPerBatch, int maxOrdersPerBatch)
+    /// <param name="maxAggregateWeight">
+    /// Peso oltre il quale l'aggregato non viene assegnato ma escluso. Zero
+    /// disattiva il limite e ripristina il comportamento precedente: ogni
+    /// aggregato, quanto grande sia, diventa una slice dedicata.
+    /// </param>
+    internal BatchPacker(int maxRowsPerBatch, int maxOrdersPerBatch, int maxAggregateWeight = 0)
     {
         if (maxRowsPerBatch <= 0) throw new ArgumentOutOfRangeException(nameof(maxRowsPerBatch));
         if (maxOrdersPerBatch <= 0) throw new ArgumentOutOfRangeException(nameof(maxOrdersPerBatch));
+        if (maxAggregateWeight < 0) throw new ArgumentOutOfRangeException(nameof(maxAggregateWeight));
+
+        // Un limite piu' basso del tetto della slice renderebbe indecidibile
+        // il caso intermedio: un aggregato sopra MaxRowsPerBatch dovrebbe
+        // essere insieme slice dedicata ed escluso.
+        if (maxAggregateWeight > 0 && maxAggregateWeight < maxRowsPerBatch)
+            throw new ArgumentOutOfRangeException(nameof(maxAggregateWeight),
+                "MaxAggregateWeight non puo' essere minore di MaxRowsPerBatch.");
+
         _maxRowsPerBatch = maxRowsPerBatch;
         _maxOrdersPerBatch = maxOrdersPerBatch;
+        _maxAggregateWeight = maxAggregateWeight;
     }
 
     internal int Total => _total;
     internal int OversizedCount => _oversized;
+
+    /// <summary>Aggregati esclusi perche' oltre MaxAggregateWeight.</summary>
+    internal int TooLargeCount => _tooLarge;
+
+    private bool IsTooLarge(int weight) => _maxAggregateWeight > 0 && weight > _maxAggregateWeight;
     /// <summary>
     /// Numero di slice prodotte. Ha significato solo dopo <see cref="Complete"/>:
     /// letto prima, non conta i collettivi ancora nel buffer.
@@ -94,6 +122,23 @@ internal sealed class BatchPacker
         var collectiveId = _collectiveBuffer[0].CollectiveOrderId;
         if (collectiveId is null) throw new InvalidOperationException("Collective buffer senza CollectiveOrderId.");
         var collectiveOrders = _collectiveBuffer.Count;
+
+        // Oltre il tetto per aggregato il collettivo non entra in nessuna
+        // slice: verrebbe cancellato in una sola transazione, e a quel peso la
+        // transazione e' il problema. Resta a database e viene censito.
+        if (IsTooLarge(_collectiveWeight))
+        {
+            var esclusi = new List<Assignment>(_collectiveBuffer.Count);
+            foreach (var c in _collectiveBuffer)
+                esclusi.Add(new Assignment(c.OrderId, BatchNo: 0, IsOversized: false,
+                                           collectiveId.Value, Excluded: true));
+            _tooLarge++;
+            _collectiveBuffer.Clear();
+            _collectiveWeight = 0;
+            _currentCollective = null;
+            return esclusi;
+        }
+
         var isOversized = _collectiveWeight > _maxRowsPerBatch || collectiveOrders > _maxOrdersPerBatch;
         if (isOversized || (_ordersInBatch > 0 && (_rowsInBatch + _collectiveWeight > _maxRowsPerBatch || _ordersInBatch + collectiveOrders > _maxOrdersPerBatch)))
         {
@@ -115,6 +160,15 @@ internal sealed class BatchPacker
         // Un candidato standalone e' un ordine solo, quindi il tetto sul numero
         // di ordini per slice non puo' essere superato: l'unico modo di essere
         // oversized e' il peso in righe.
+        // Stesso tetto dei collettivi: un ordine con migliaia di revisioni
+        // resta a database invece di diventare una transazione ingestibile.
+        if (IsTooLarge(candidate.Weight))
+        {
+            _tooLarge++;
+            return new Assignment(candidate.OrderId, BatchNo: 0, IsOversized: false,
+                                  CollectiveOrderId: null, Excluded: true);
+        }
+
         var isOversized = candidate.Weight > _maxRowsPerBatch;
         if (isOversized)
         {

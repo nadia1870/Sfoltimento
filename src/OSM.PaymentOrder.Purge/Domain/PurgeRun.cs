@@ -225,6 +225,17 @@ public sealed class DryRunReport
     public void AddUnknownStatus(string statusCode, long count, DateTime? oldest) =>
         _unknownStatuses.Add((statusCode, count, oldest));
 
+    /// <summary>Aggregati esclusi perche' oltre MaxAggregateWeight.</summary>
+    public long ExcludedAggregates { get; private set; }
+
+    public int? ExcludedAggregateMaxWeight { get; private set; }
+
+    public void AddExcludedAggregates(long count, int? maxWeight)
+    {
+        ExcludedAggregates = count;
+        ExcludedAggregateMaxWeight = maxWeight;
+    }
+
     public long OrderCount => _lines.GetValueOrDefault("Order");
     public long TotalRows => _lines.Values.Sum();
 
@@ -250,6 +261,13 @@ public sealed class DryRunReport
             sb.AppendLine("Collettivi esclusi e censiti (non verranno cancellati):");
             foreach (var (reason, count) in _excludedCollectives.OrderBy(e => e.Key))
                 sb.AppendLine($"  {reason,-34}{count,14:N0}");
+        }
+        if (ExcludedAggregates > 0)
+        {
+            sb.AppendLine($"Aggregati oltre il tetto, esclusi: {ExcludedAggregates:N0} " +
+                          $"(peso massimo {ExcludedAggregateMaxWeight:N0} righe)");
+            sb.AppendLine("  ^ restano a database: superano MaxAggregateWeight e una sola");
+            sb.AppendLine("    transazione non li reggerebbe. Vanno trattati a parte.");
         }
         if (_unknownStatuses.Count > 0)
         {
